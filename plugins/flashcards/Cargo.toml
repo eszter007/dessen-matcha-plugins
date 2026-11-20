@@ -1,0 +1,27 @@
+[package]
+name = "flashcards"
+version = "0.1.0"
+edition = "2021"
+description = "matcha-reader's Flashcards (Anki and Migaku) as a dessen app"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+libm = "0.2"
+linked_list_allocator = { version = "0.10", default-features = false }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = false
+
+[profile.dev]
+panic = "abort"

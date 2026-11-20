@@ -16,7 +16,11 @@ Also prints the faces' line metrics for the app.
 
 A face can also be rasterized from an OpenType font, the way matcha's fontconvert.py does
 (150 DPI, any ink kept), for the Chinese characters matcha's Japanese subsets lack:
-  face=@font.otf:points:skipface   GB2312 and Big5 ideographs not already in skipface (needs Pillow)
+  face=@font.otf:points:skipface[:set]   (needs Pillow) set is one of
+      cjk     GB2312 and Big5 ideographs not already in skipface (the default)
+      cjkall  kana, CJK punctuation, full-width forms and GB2312/Big5 ideographs
+      digits  0-9
+      latin   Basic Latin, Latin-1, Latin Extended-A/B and general punctuation
 
 usage: matcha_fonts.py <matcha-reader checkout> <out dir> face=header[:min-max] ...
 """
@@ -122,22 +126,35 @@ def existing(outdir):
     return have
 
 
-def rasterize(path, points, skip):
+def charset(name):
+    if name == 'digits':
+        return range(0x30, 0x3A)
+    if name == 'latin':
+        return list(range(0x20, 0x250)) + list(range(0x2000, 0x2070))
+    out = []
+    if name == 'cjkall':
+        out += list(range(0x3000, 0x3100)) + list(range(0xFF00, 0xFFF0))
+    for cp in range(0x4E00, 0xA000):
+        ch = chr(cp)
+        for enc in ('gb2312', 'big5'):
+            try:
+                ch.encode(enc)
+                out.append(cp)
+                break
+            except UnicodeEncodeError:
+                pass
+    return out
+
+
+def rasterize(path, points, skip, setname='cjk'):
     from PIL import ImageFont
     font = ImageFont.truetype(path, round(points * 150 / 72))
     ascent, descent = font.getmetrics()
     cps, glyphs = [], {}
-    for cp in range(0x4E00, 0xA000):
+    for cp in charset(setname):
         ch = chr(cp)
-        if cp in skip:
+        if cp in skip or font.getmask(ch).getbbox() is None and not ch.isspace():
             continue
-        try:
-            ch.encode('gb2312')
-        except UnicodeEncodeError:
-            try:
-                ch.encode('big5')
-            except UnicodeEncodeError:
-                continue
         mask, (ox, oy) = font.getmask2(ch, mode='L', anchor='ls')
         w, h = mask.size
         rows = [[mask.getpixel((x, y)) >= 64 for x in range(w)] for y in range(h)]
@@ -152,8 +169,9 @@ def main():
         face, header = spec.split('=')
         lo, hi = 0, 0xFFFF
         if header.startswith('@'):
-            path, points, skipface = header[1:].split(':')
-            metrics, cps, glyphs = rasterize(path, int(points), existing(os.path.join(out, skipface)))
+            path, points, skipface, *setname = header[1:].split(':')
+            skip = existing(os.path.join(out, skipface)) if skipface else set()
+            metrics, cps, glyphs = rasterize(path, int(points), skip, *setname)
             n, size = write_face(os.path.join(out, face), cps, glyphs, lo, hi)
             print('%-6s %-28s ascender %d  %d files, %d bytes' % (face, os.path.basename(path), metrics[1], n, size))
             continue

@@ -7,6 +7,7 @@
 | Plugin | What it does |
 |---|---|
 | [Insights](plugins/insights) | matcha's Insights screen: streak, this week, books finished, days read, total time, longest streak, sessions, average session, month calendar, language tabs, and a page per book |
+| [Flashcards](plugins/flashcards) | matcha's Flashcards, in Rust: Anki and Migaku decks synced through [matcha-anki-server](https://github.com/eszter007/matcha-anki-server), reviewed with FSRS-5 and Anki's learning steps, burying, Easy Days and leeches; reviews and schedules go back with each sync. Proof of concept: cards are plain text and 1-bit pictures |
 | [Ticket](plugins/ticket) | matcha's end-of-book ticket: when you leave a book you read to the end, the cover and title on a torn ticket with a 読了 stamp and the start and finish dates, reading time and days on the stub, Home and Continue with the next book |
 
 ## Requirements
@@ -31,6 +32,11 @@ make
 
 Needs a RISC-V GCC; the one PlatformIO installs for ESP32-C3/S3 is used by
 default (`RISCV=` to point elsewhere). Output goes to `dist/<plugin>/`.
+
+Rust plugins (a `Cargo.toml` in the plugin folder) also need Rust with the
+bare-metal RV32IM target: `rustup target add riscv32im-unknown-none-elf`. Cargo
+builds a static library exporting `main`, which is linked with the SDK's own
+`crt0.S` and `app.ld` like a C app.
 
 The Ticket's fonts are generated from a matcha-reader checkout:
 
