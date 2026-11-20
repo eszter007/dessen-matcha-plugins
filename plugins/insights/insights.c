@@ -3,9 +3,9 @@
 // a book list; each book opens its own page (sessions, time, average, days,
 // calendar with start and finish marks).
 //
-// Data: device.json routes reader.session to this app ("app" handler, read
-// mode), so the firmware queues the events in app-events.jsonl and never
-// drains them. Each launch folds them into stats.db and clears the queue
+// Data: device.json routes reader.session and reader.exit to this app ("app"
+// handler, read mode), so the firmware queues the events in app-events.jsonl
+// and never drains them. An exit at end_percent 100 marks the book finished. Each launch folds them into stats.db and clears the queue
 // (events.jsonl from the old always-failing-request setup is read too). The firmware drops a queue past 4 KB (about a dozen sessions), so the
 // app should be opened now and then. A book's language and title come from the
 // reader's own cache, /.crosspoint/epub_<std::hash(path)>/book.bin.
@@ -44,6 +44,7 @@ static int nBooks;
 static char langs[MAX_LANGS][8];
 static int nLangs;
 static int tzOffset;
+static unsigned today;  // local day number, 0 when the clock is unset
 
 static char dir[128];
 static int dirLen;
@@ -383,6 +384,21 @@ static int jstr(const char *line, const char *key, char *out, int cap) {
   return 0;
 }
 
+// A bare number field ("ts": 1795209615).
+static unsigned jnum(const char *line, const char *key) {
+  const int kl = slen(key);
+  for (const char *s = line; *s; s++) {
+    if (*s != '"') continue;
+    int i = 0;
+    while (i < kl && s[1 + i] == key[i]) i++;
+    if (i < kl || s[1 + kl] != '"') continue;
+    s += kl + 2;
+    while (*s == ':' || *s == ' ') s++;
+    return parseu(&s);
+  }
+  return 0;
+}
+
 static void addSession(Book *b, unsigned start, unsigned secs, unsigned endbp) {
   const int lang = bookLang(b);
   unsigned t = (unsigned)((int)start + tzOffset), day = t / 86400;
@@ -410,7 +426,17 @@ static void ingestFile(const char *name) {
     while (*e && *e != '\n') e++;
     char save = *e; *e = 0;
     char ev[24], v[PATH_MAX_LEN];
-    if (jstr(line, "e", ev, sizeof ev) && seq(ev, "reader.session")) {
+    if (jstr(line, "e", ev, sizeof ev) && seq(ev, "reader.exit")) {
+      // Leaving a book read past its last page finishes it, though the session's own progress
+      // stops where that page starts (78% in a three-page book).
+      if (jstr(line, "end_percent", v, sizeof v) && seq(v, "100") && jstr(line, "book", v, sizeof v)) {
+        Book *b = bookAt(v);
+        bookLang(b);
+        const unsigned ts = jnum(line, "ts");
+        if (!b->finish) b->finish = (unsigned short)(ts > 1600000000u ? (unsigned)((int)ts + tzOffset) / 86400u : today);
+        if (b->end_bp < 10000) b->end_bp = 10000;
+      }
+    } else if (jstr(line, "e", ev, sizeof ev) && seq(ev, "reader.session")) {
       const char *q;
       unsigned start = 0, dur = 0, endbp = 0;
       if (jstr(line, "start_time", v, sizeof v)) { q = v; start = parseu(&q); }
@@ -430,7 +456,6 @@ static void ingest(void) {
 }
 
 // ---------------------------------------------------------------- numbers per tab
-static unsigned today;  // local day number, 0 when the clock is unset
 static int tabLang[MAX_LANGS + 1];  // -1 = All
 static int nTabs, tab;
 

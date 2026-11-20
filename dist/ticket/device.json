@@ -1,0 +1,7 @@
+{
+  "title": "Ticket",
+  "description": "Matcha's end-of-book ticket when you finish a book",
+  "events": {
+    "reader.exit": { "app": "app.bin", "mode": "launch" }
+  }
+}

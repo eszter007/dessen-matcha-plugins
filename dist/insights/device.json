@@ -2,6 +2,7 @@
   "title": "Insights",
   "description": "Reading streaks, time and days read, by language",
   "events": {
-    "reader.session": { "app": "app.bin", "mode": "read" }
+    "reader.session": { "app": "app.bin", "mode": "read" },
+    "reader.exit": { "app": "app.bin", "mode": "read" }
   }
 }
