@@ -3,10 +3,10 @@
 // a book list; each book opens its own page (sessions, time, average, days,
 // calendar with start and finish marks).
 //
-// Data: the firmware's reader.session events queue in this plugin's
-// events.jsonl (device.json subscribes with a request that always fails, so
-// the queue is kept). Each launch folds them into stats.db and clears the
-// queue. The firmware drops a queue past 4 KB (about a dozen sessions), so the
+// Data: device.json routes reader.session to this app ("app" handler, read
+// mode), so the firmware queues the events in app-events.jsonl and never
+// drains them. Each launch folds them into stats.db and clears the queue
+// (events.jsonl from the old always-failing-request setup is read too). The firmware drops a queue past 4 KB (about a dozen sessions), so the
 // app should be opened now and then. A book's language and title come from the
 // reader's own cache, /.crosspoint/epub_<std::hash(path)>/book.bin.
 #include "dessen.h"
@@ -399,8 +399,8 @@ static void addSession(Book *b, unsigned start, unsigned secs, unsigned endbp) {
   if (endbp > b->end_bp) b->end_bp = endbp;
 }
 
-static void ingest(void) {
-  char p[160]; int pl = mkpath(p, "events.jsonl");
+static void ingestFile(const char *name) {
+  char p[160]; int pl = mkpath(p, name);
   int n = dsn_fs_read(p, pl, evbuf, sizeof evbuf - 1);
   if (n <= 0) return;
   evbuf[n] = 0;
@@ -422,6 +422,11 @@ static void ingest(void) {
     line = *e ? e + 1 : e;
   }
   if (saveDb() == 0) dsn_fs_delete(p, pl);
+}
+
+static void ingest(void) {
+  ingestFile("events.jsonl");      // left over from the old device.json
+  ingestFile("app-events.jsonl");
 }
 
 // ---------------------------------------------------------------- numbers per tab
