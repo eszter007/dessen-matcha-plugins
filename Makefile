@@ -21,7 +21,7 @@ dist/%/app.bin: plugins/%/*.c plugins/%/*.h plugins/%/*.json $(SDK)/crt0.S $(SDK
 	for d in fonts stamps; do if [ -d plugins/$*/$$d ]; then rm -rf dist/$*/$$d && cp -R plugins/$*/$$d dist/$*/; fi; done
 
 # A Rust plugin (plugins/<name>/Cargo.toml): a staticlib exporting main(), linked like a C app.
-dist/%/app.bin: plugins/%/Cargo.toml plugins/%/src/*.rs plugins/%/*.json $(SDK)/crt0.S $(SDK)/app.ld
+dist/%/app.bin: plugins/%/Cargo.toml plugins/%/src/*.rs plugins/%/*.json $(SDK)/dessen.rs $(SDK)/crt0.S $(SDK)/app.ld
 	@mkdir -p build dist/$*
 	cd plugins/$* && $(CARGO) build --release --target $(RUST_TARGET) --target-dir ../../build/rust
 	$(RISCV)gcc -march=rv32im -mabi=ilp32 -nostdlib -mno-relax -I$(SDK) -T $(SDK)/app.ld -Wl,--no-warn-rwx-segments \

@@ -34,8 +34,9 @@ Needs a RISC-V GCC; the one PlatformIO installs for ESP32-C3/S3 is used by
 default (`RISCV=` to point elsewhere). Output goes to `dist/<plugin>/`.
 
 Rust plugins (a `Cargo.toml` in the plugin folder) also need Rust with the
-bare-metal RV32IM target: `rustup target add riscv32im-unknown-none-elf`. Cargo
-builds a static library exporting `main`, which is linked with the SDK's own
+bare-metal RV32IM target: `rustup target add riscv32im-unknown-none-elf`. They
+use Dessen's generated Rust wrappers (`dessen/sdk/dessen.rs`, `include!`d), and
+Cargo builds a static library exporting `main`, linked with the SDK's own
 `crt0.S` and `app.ld` like a C app.
 
 The Ticket's fonts are generated from a matcha-reader checkout:
