@@ -21,7 +21,10 @@ const HDR_STRIP: i32 = 20;
 const HDR_SIDE: i32 = 18;
 fn band_top() -> i32 { (HDR_TOP - unsafe { INSET_TOP }).max(0) }
 /// The screen's title; a key of the word list, or text shown as it is.
-fn header(title: &str) {
+fn header(title: &str) { header_with(title, false) }
+const HDR_BACK: i32 = 44;
+/// A sub page's header: on touch boards a back arrow leads the title.
+fn header_with(title: &str, back: bool) {
     let title = &tr(title);
     let (w, _) = screen();
     let top = band_top();
@@ -42,7 +45,17 @@ fn header(title: &str) {
     }
     let row_top = top + HDR_STRIP;
     // Right to left: the title stands at the right (the settings icon then sits at the left).
-    let tx = if crate::i18n::rtl() { w - HDR_SIDE - gfx::text_width(UI12B, title) } else { HDR_SIDE };
+    let rtl = crate::i18n::rtl();
+    let back = back && touch();
+    if back {
+        let cy = row_top + (HDR_HEIGHT - HDR_STRIP) / 2 - 2;
+        let (cx, d) = if rtl { (w - HDR_SIDE - HDR_BACK / 2 + 4, -1) } else { (HDR_SIDE + HDR_BACK / 2 - 4, 1) };
+        dsn::line(cx - 10 * d, cy, cx + 10 * d, cy, 3, dsn::BLACK);
+        dsn::line(cx - 10 * d, cy, cx - 2 * d, cy - 8, 3, dsn::BLACK);
+        dsn::line(cx - 10 * d, cy, cx - 2 * d, cy + 8, 3, dsn::BLACK);
+    }
+    let shift = if back { HDR_BACK + 4 } else { 0 };
+    let tx = if rtl { w - HDR_SIDE - shift - gfx::text_width(UI12B, title) } else { HDR_SIDE + shift };
     gfx::text(tx, row_top + (HDR_HEIGHT - HDR_STRIP - UI12B.line_h) / 2 - 2, UI12B, title, dsn::BLACK);
 }
 fn content_top() -> i32 { band_top() + HDR_HEIGHT }
@@ -581,6 +594,11 @@ impl SyncScreen {
             gfx::text_centered(w / 2, top + 110, UI10, detail, dsn::BLACK);
         }
         if finished {
+            if touch() {
+                let by = safe_bottom() - 56 - 16;
+                dsn::fill_round(30, by, w - 60, 56, dsn::BLACK, 12);
+                gfx::text_centered(w / 2, by + (56 - UI12B.line_h) / 2, UI12B, &tr("done"), dsn::WHITE);
+            }
             hints(["back", "done", "", ""]);
         }
         let _ = h;
@@ -681,7 +699,7 @@ fn test_connection() {
 fn wait_dismiss() {
     loop {
         let t = dsn::ev_type(dsn::wait_event());
-        if t == dsn::EV_BACK || t == dsn::EV_CONFIRM || t == dsn::EV_TAP {
+        if matches!(t, dsn::EV_BACK | dsn::EV_CONFIRM | dsn::EV_TAP | dsn::EV_NEXT | dsn::EV_PREV) {
             return;
         }
     }
@@ -782,7 +800,7 @@ impl SettingsScreen {
     fn draw(&mut self) {
         let (w, _) = screen();
         dsn::clear();
-        header(self.title);
+        header_with(self.title, true);
         self.row_ys.clear();
         let (left, right) = (SIDE_PAD + ROW_INSET, w - SIDE_PAD - ROW_INSET);
         let mut y = content_top() + 4;
@@ -881,6 +899,12 @@ impl SettingsScreen {
                 dsn::EV_CONFIRM => self.change(self.selected),
                 dsn::EV_TAP => {
                     let y = dsn::ev_y(e);
+                    let x = dsn::ev_x(e);
+                    let (w, _) = screen();
+                    let in_slot = if crate::i18n::rtl() { x > w - HDR_SIDE - HDR_BACK - 8 } else { x < HDR_SIDE + HDR_BACK + 8 };
+                    if touch() && y >= band_top() + HDR_STRIP && y < content_top() && in_slot {
+                        return;
+                    }
                     let Some(&(i, _)) = self.row_ys.iter().rev().find(|(_, ry)| y >= *ry) else { continue };
                     self.selected = i;
                     self.change(i);
