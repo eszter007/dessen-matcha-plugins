@@ -779,7 +779,8 @@ static void drawBattery(int right, int y) {
   dsn_fill(gx + gw, gy + 3, 2, gh - 6, DSN_BLACK);
   int fill = (gw - 4) * pct / 100;
   if (fill) dsn_fill(gx + 2, gy + 2, fill, gh - 4, DSN_BLACK);
-  text(gx - 4 - tw - 2, y + (HDR_STRIP - sLH) / 2, tw + 4, DSN_FONT_SMALL, DSN_ALIGN_RIGHT, 0, buf);
+  const int ty = y + (HDR_STRIP - sLH) / 2;  // a box above the screen draws nothing
+  text(gx - 4 - tw - 2, ty < 0 ? 0 : ty, tw + 4, DSN_FONT_SMALL, DSN_ALIGN_RIGHT, 0, buf);
 }
 
 static void drawThemeHeader(const char *title) {
@@ -792,7 +793,8 @@ static void drawThemeHeader(const char *title) {
     p = utoa(c.hour, p); *p++ = ':';
     if (c.minute < 10) *p++ = '0';
     utoa(c.minute, p);
-    text(inset, top + (HDR_STRIP - sLH) / 2, 80, DSN_FONT_SMALL, DSN_ALIGN_LEFT, 0, buf);
+    const int ty = top + (HDR_STRIP - sLH) / 2;
+    text(inset, ty < 0 ? 0 : ty, 80, DSN_FONT_SMALL, DSN_ALIGN_LEFT, 0, buf);
   }
   drawBattery(W - inset, top);
   const int rowTop = top + HDR_STRIP, rowHt = HDR_HEIGHT - HDR_STRIP;

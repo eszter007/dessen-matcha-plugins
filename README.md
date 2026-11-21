@@ -6,11 +6,13 @@
 
 | Plugin | What it does |
 |---|---|
+| [Home](plugins/home) | matcha's Home as a home launcher: the book you are reading with its progress, the next six recent books as covers with New tabs, and matcha's tab bar. [User guide](plugins/home/docs/GUIDE.md) |
 | [Insights](plugins/insights) | matcha's Insights screen: streak, this week, books finished, days read, total time, longest streak, sessions, average session, month calendar, language tabs, and a page per book. [User guide](plugins/insights/docs/GUIDE.md) |
 | [Flashcards](plugins/flashcards) | matcha's Flashcards, in Rust: Anki and Migaku decks synced through [matcha-anki-server](https://github.com/eszter007/matcha-anki-server), reviewed with FSRS-5 and Anki's learning steps, burying, Easy Days and leeches. Anki cards keep their CSS; words mined in matcha show on its spine card and can be reviewed before they reach Anki, then handed over. 37 languages. [User guide](plugins/flashcards/docs/GUIDE.md) |
 | [Ticket](plugins/ticket) | matcha's end-of-book ticket: when you leave a book you read to the end, the cover and title on a torn ticket with a 読了 stamp and the start and finish dates, reading time and days on the stub, Home and Continue with the next book. [User guide](plugins/ticket/docs/GUIDE.md) |
 
 <p>
+<img src="plugins/home/docs/img/home.png" width="160" alt="Home">
 <img src="plugins/insights/docs/img/insights.png" width="160" alt="Insights">
 <img src="plugins/insights/docs/img/insights-calendar.png" width="160" alt="Insights: calendar">
 <img src="plugins/ticket/docs/img/ticket-ja.png" width="160" alt="Ticket">

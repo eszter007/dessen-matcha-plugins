@@ -7,6 +7,7 @@ comma = ,
 PLUGINS = $(notdir $(wildcard plugins/*))
 # App memory per plugin, when it needs more than the SDK's 64 KB (PSRAM boards allow up to 4 MB).
 APP_MEM_ticket = 1572864
+APP_MEM_home = 262144
 APP_MEM_flashcards = 4194304
 CARGO ?= cargo
 RUST_TARGET = riscv32im-unknown-none-elf
