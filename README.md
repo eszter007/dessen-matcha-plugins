@@ -6,10 +6,16 @@
 
 | Plugin | What it does |
 |---|---|
-| [Insights](plugins/insights) | matcha's Insights screen: streak, this week, books finished, days read, total time, longest streak, sessions, average session, month calendar, language tabs, and a page per book |
+| [Insights](plugins/insights) | matcha's Insights screen: streak, this week, books finished, days read, total time, longest streak, sessions, average session, month calendar, language tabs, and a page per book. [User guide](plugins/insights/docs/GUIDE.md) |
 | [Flashcards](plugins/flashcards) | matcha's Flashcards, in Rust: Anki and Migaku decks synced through [matcha-anki-server](https://github.com/eszter007/matcha-anki-server), reviewed with FSRS-5 and Anki's learning steps, burying, Easy Days and leeches. Anki cards keep their CSS; words mined in matcha show on its spine card and can be reviewed before they reach Anki, then handed over. 37 languages. [User guide](plugins/flashcards/docs/GUIDE.md) |
-| [Ticket](plugins/ticket) | matcha's end-of-book ticket: when you leave a book you read to the end, the cover and title on a torn ticket with a 読了 stamp and the start and finish dates, reading time and days on the stub, Home and Continue with the next book |
+| [Ticket](plugins/ticket) | matcha's end-of-book ticket: when you leave a book you read to the end, the cover and title on a torn ticket with a 読了 stamp and the start and finish dates, reading time and days on the stub, Home and Continue with the next book. [User guide](plugins/ticket/docs/GUIDE.md) |
 
+<p>
+<img src="plugins/insights/docs/img/insights.png" width="160" alt="Insights">
+<img src="plugins/insights/docs/img/insights-calendar.png" width="160" alt="Insights: calendar">
+<img src="plugins/ticket/docs/img/ticket-ja.png" width="160" alt="Ticket">
+<img src="plugins/ticket/docs/img/ticket-zh.png" width="160" alt="Ticket: Chinese">
+</p>
 <p>
 <img src="plugins/flashcards/docs/img/deck-list.png" width="160" alt="Flashcards: deck list">
 <img src="plugins/flashcards/docs/img/spine-ja-front.png" width="160" alt="Flashcards: spine card">

@@ -296,3 +296,14 @@ In `/plugins/flashcards/`:
 - The plugin opens about a second after you choose it (the Home screen is drawn first), and the
   first sync of a big deck is slow: apps run in a sandbox at about 1.5 million instructions a
   second.
+
+## The other plugins
+
+<p>
+<img src="../../insights/docs/img/insights.png" width="200" alt="Insights">
+<img src="../../ticket/docs/img/ticket-ja.png" width="200" alt="Ticket">
+</p>
+
+[Insights](../../insights/docs/GUIDE.md) shows your reading streak, time and books, and
+[Ticket](../../ticket/docs/GUIDE.md) turns a finished book into matcha's torn ticket. Flashcards
+shares their tab bar.
