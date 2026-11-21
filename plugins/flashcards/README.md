@@ -1,20 +1,22 @@
 Flashcards
 
 Matcha's Flashcards as a plugin, written in Rust: your Anki and Migaku decks,
-synced through matcha-anki-server, reviewed with FSRS-5 and Anki's learning
+and the words you mined in matcha, reviewed with FSRS-5 and Anki's learning
 steps, burying, Easy Days and leeches, as matcha does. Reviews go back to Anki
-(or Migaku) with each sync.
+(or Migaku) with each sync through matcha-anki-server.
 
-Proof of concept: cards show as plain text and 1-bit pictures, without the
-deck's styling or furigana. Pictures come as PNG; other formats need
-matcha-anki-server with PNG copies (its dessen branch).
+Cards keep their look: Anki cards are laid out from their HTML and CSS (serif
+and sans in eight sizes, furigana, lists, tables, pictures, right-to-left
+text), and words mined in matcha show on matcha's spine card. Words mined in
+matcha (/sentence-mining) can be reviewed before they reach Anki, and the
+sync hands them over as matcha does.
 
-Setup: put a config.json in this folder:
-  {"server": "http://192.168.1.2:8080", "key": "your server key",
-   "anki": ["Kaishi 1.5k"], "migaku": ["日本語"]}
-then open Flashcards and choose Sync Flashcards.
+Setup: open Flashcards, choose the settings icon at the right of the title,
+then Flashcards Sync: enter the server address, its key and your Anki or
+Migaku decks. Back on the deck list, choose Sync Flashcards.
 
-Insights and Flashcards share matcha's tab bar at the bottom: Home, Library,
-Transfer, Insights, Flashcards and Settings. Tap a tab, or press Down past the
-last row to move into the bar, Up/Down to pick a tab and Confirm to switch.
-Home closes the plugin (dessen has no call to open Home itself).
+Needs a board with PSRAM (4 MB of app memory) and about 125 MB on the SD card.
+The screens follow CrossPoint's language.
+
+User guide with screenshots:
+https://github.com/eszter007/dessen-matcha-plugins/blob/main/plugins/flashcards/docs/GUIDE.md

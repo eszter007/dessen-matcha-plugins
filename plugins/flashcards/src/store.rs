@@ -101,6 +101,7 @@ pub struct DeckInfo {
     pub new_mix: String,
     pub new_random: bool,
     pub last_review_id: u64,
+    pub preset: bool, // its Anki preset was read; else the plugin's settings schedule it
 }
 
 fn num(v: &Value, k: &str, d: f64) -> f64 { v.get(k).and_then(|x| x.as_f64()).unwrap_or(d) }
@@ -117,7 +118,7 @@ impl DeckInfo {
             new_per_day: 20, reviews_per_day: 9999, retention: 0.9, max_interval: 36500, learn_steps: vec![10],
             relearn_steps: vec![10], bury_new: false, bury_reviews: false, easy_days: [100; 7], leech_threshold: 0,
             leech_suspend: true, review_order: String::from("day"), new_mix: String::from("mixed"), new_random: false,
-            last_review_id: 0,
+            last_review_id: 0, preset: false,
         }
     }
     pub fn read(key: &str) -> Option<DeckInfo> {
@@ -126,6 +127,14 @@ impl DeckInfo {
                                   &text(&v, "serverId"));
         d.apply_preset(&v);
         d.last_review_id = text(&v, "lastReviewId").parse().unwrap_or(0);
+        d.preset = v.get("preset").and_then(|x| x.as_bool()).unwrap_or(false);
+        if !d.preset {
+            // As matcha's schedulingParams: the user's settings where no preset was read.
+            let st = Settings::read();
+            d.retention = st.retention_value();
+            d.max_interval = st.max_interval_days();
+            d.new_per_day = st.new_per_day_value() as i32;
+        }
         Some(d)
     }
     /// A preset's settings as deckPresets.get returns them (also how they are saved).
@@ -161,17 +170,150 @@ impl DeckInfo {
             "easyDaysPercentages": self.easy_days, "leechThreshold": self.leech_threshold,
             "leechAction": if self.leech_suspend { "suspend" } else { "tagOnly" }, "reviewOrder": self.review_order,
             "newMix": self.new_mix, "newSortOrder": if self.new_random { "randomCard" } else { "template" },
-            "lastReviewId": format!("{}", self.last_review_id),
+            "lastReviewId": format!("{}", self.last_review_id), "preset": self.preset,
         });
         write_json(&format!("{}.json", self.key), &v)
     }
     pub fn params(&self) -> fsrs::Params { fsrs::Params { retention: self.retention, max_interval: self.max_interval } }
 }
 
+// ---------------------------------------------------------------- settings
+/// matcha's Settings > Flashcards, kept in config.json beside the sync's server and decks:
+/// "retention" 0-3 (80/85/90/95 %), "newPerDay" 0-4 (5/10/20/30/50), "maxInterval" 0-3
+/// (1 month, 6 months, 1 year, no limit), "vacation". Anki's own deck preset wins where read.
+pub struct Settings {
+    pub retention: u8,
+    pub new_per_day: u8,
+    pub max_interval: u8,
+    pub vacation: bool,
+}
+pub const RETENTION: [f32; 4] = [0.80, 0.85, 0.90, 0.95];
+pub const NEW_PER_DAY: [u16; 5] = [5, 10, 20, 30, 50];
+pub const MAX_DAYS: [u16; 4] = [30, 180, 365, 36500];
+impl Settings {
+    pub fn read() -> Settings {
+        let cfg = read_json("config.json").unwrap_or(Value::Null);
+        let n = |k: &str, d: u8, max: u8| cfg.get(k).and_then(|v| v.as_u64()).map(|v| (v as u8).min(max)).unwrap_or(d);
+        Settings {
+            retention: n("retention", 2, 3),
+            new_per_day: n("newPerDay", 1, 4),
+            max_interval: n("maxInterval", 3, 3),
+            vacation: cfg.get("vacation").and_then(|v| v.as_bool()).unwrap_or(false),
+        }
+    }
+    pub fn retention_value(&self) -> f32 { RETENTION[self.retention as usize] }
+    pub fn new_per_day_value(&self) -> u16 { NEW_PER_DAY[self.new_per_day as usize] }
+    pub fn max_interval_days(&self) -> u16 { MAX_DAYS[self.max_interval as usize] }
+}
+/// Writes one field of config.json, keeping the rest.
+pub fn set_config(key: &str, value: Value) -> bool {
+    let mut cfg = read_json("config.json").filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
+    cfg[key] = value;
+    write_json("config.json", &cfg)
+}
+
+/// Vacation mode as matcha's syncVacation: its start day is kept in vacation.bin; when it ends,
+/// every card's due date (and last review) moves forward by the days away.
+pub fn sync_vacation() {
+    let on = Settings::read().vacation;
+    let rec = read_file("vacation.bin").filter(|b| b.len() == 2);
+    let now = today();
+    if on {
+        if rec.is_none() && now > 0 {
+            write_file("vacation.bin", &now.to_le_bytes());
+        }
+        return;
+    }
+    let Some(b) = rec else { return };
+    let start = u16::from_le_bytes([b[0], b[1]]);
+    let shift = now as i32 - start as i32;
+    if start != 0 && shift > 0 {
+        let keys = deck_keys();
+        // Every deck must load before any is written, so none is shifted twice or never.
+        let loaded: Vec<(String, (Vec<CardState>, u16, u16))> = keys.iter().map(|k| (k.clone(), load_states(k))).collect();
+        for (k, (mut states, day, new_today)) in loaded {
+            if states.is_empty() {
+                continue;
+            }
+            for st in states.iter_mut() {
+                st.due = (st.due as i32 + shift).min(u16::MAX as i32) as u16;
+                st.last_review = (st.last_review as i32 + shift).min(u16::MAX as i32) as u16;
+            }
+            write_states(&k, &states, day, new_today);
+        }
+    }
+    delete_file("vacation.bin");
+}
+
 /// The synced decks, in the order of decks.json (written by the sync).
 pub fn deck_keys() -> Vec<String> {
     read_json("decks.json").and_then(|v| v.as_array().cloned()).unwrap_or_default().iter()
         .filter_map(|k| k.as_str().map(String::from)).collect()
+}
+
+// ---------------------------------------------------------------- mined words
+/// matcha's note type for words mined while reading (AnkiSync.cpp, docs/anki).
+pub const MINED_NOTE_TYPE: &str = "Matcha sentence";
+/// An Anki card's side kept as HTML: this, its CSS file's name, \x1f, the HTML.
+pub const HTML_MARK: &str = "\u{1e}H";
+/// (CSS, HTML) of a side kept as HTML.
+pub fn decode_html(side: &str) -> Option<(String, &str)> {
+    let rest = side.strip_prefix(HTML_MARK)?;
+    let (css_file, html) = rest.split_once('\u{1f}')?;
+    let css = read_file(&format!("{}.css", css_file)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    Some((css, html))
+}
+/// A mined card's front side starts with this; its fields follow, split by \x1f.
+pub const MINED_MARK: &str = "\u{1e}M";
+pub struct Mined {
+    pub word: String,
+    pub reading: String,
+    pub sentence: String,   // the word between \x01 and \x02
+    pub definition: String, // one row per line
+    pub book: String,
+    pub furigana: String,
+}
+/// matcha's stripExportHtml: <b> to the given marks, <br> to the line break, the five entities.
+pub fn strip_export_html(html: &str, open: &str, close: &str, br: &str) -> String {
+    const SWAPS: [(&str, usize); 9] = [("<b>", 0), ("</b>", 1), ("<br>", 2), ("<br/>", 2), ("&amp;", 3), ("&lt;", 4), ("&gt;", 5), ("&quot;", 6), ("&#39;", 7)];
+    let to = [open, close, br, "&", "<", ">", "\"", "'"];
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    let b = html.as_bytes();
+    'outer: while i < b.len() {
+        if b[i] == b'<' || b[i] == b'&' {
+            for (from, k) in SWAPS {
+                if html[i..].starts_with(from) {
+                    out.push_str(to[k]);
+                    i += from.len();
+                    continue 'outer;
+                }
+            }
+        }
+        let ch = html[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+pub fn encode_mined(fields: &serde_json::Value) -> String {
+    let f = |k: &str| String::from(fields.get(k).and_then(|v| v.as_str()).unwrap_or("")).replace('\u{1f}', " ");
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        MINED_MARK,
+        strip_export_html(&f("Word"), "", "", " "),
+        strip_export_html(&f("Reading"), "", "", " "),
+        strip_export_html(&f("Sentence"), "\u{1}", "\u{2}", " "),
+        strip_export_html(&f("Definition"), "", "", "\n"),
+        strip_export_html(&f("Book"), "", "", " "),
+        f("Furigana"),
+    )
+}
+pub fn decode_mined(side: &str) -> Option<Mined> {
+    let rest = side.strip_prefix(MINED_MARK)?;
+    let mut p = rest.split('\u{1f}').skip(1).map(String::from);
+    let mut n = || p.next().unwrap_or_default();
+    Some(Mined { word: n(), reading: n(), sentence: n(), definition: n(), book: n(), furigana: n() })
 }
 
 // ---------------------------------------------------------------- card index and sides
@@ -254,7 +396,11 @@ pub const LEARN_STEP: u8 = 0x07;
 pub const LEARN_RELEARN: u8 = 0x08;
 
 pub fn load_states(key: &str) -> (Vec<CardState>, u16, u16) {
-    let b = read_file(&format!("{}.state", key)).unwrap_or_default();
+    // A deck of words mined in matcha keeps its progress in matcha's own file.
+    let b = match crate::mined::progress_path(key) {
+        Some(p) => read(&p).and_then(|m| crate::mined::from_matcha(&m)).unwrap_or_default(),
+        None => read_file(&format!("{}.state", key)).unwrap_or_default(),
+    };
     if b.len() < 4 {
         return (Vec::new(), today(), 0);
     }
@@ -269,7 +415,9 @@ pub fn load_states(key: &str) -> (Vec<CardState>, u16, u16) {
         reps: u16::from_le_bytes([c[20], c[21]]),
         lapses: c[22],
         flags: c[23],
-    }).collect();
+    }).collect::<Vec<_>>();
+    let mut states = states;
+    states.sort_by_key(|s| s.id);
     (states, day, new_today)
 }
 pub fn write_states(key: &str, states: &[CardState], day: u16, new_today: u16) -> bool {
@@ -286,7 +434,10 @@ pub fn write_states(key: &str, states: &[CardState], day: u16, new_today: u16) -
         b.push(s.lapses);
         b.push(s.flags);
     }
-    write_file(&format!("{}.state", key), &b)
+    match crate::mined::progress_path(key) {
+        Some(p) => write(&p, &crate::mined::to_matcha(&b)),
+        None => write_file(&format!("{}.state", key), &b),
+    }
 }
 fn find(states: &[CardState], id: u64) -> Option<usize> { states.binary_search_by_key(&id, |s| s.id).ok() }
 
@@ -301,8 +452,11 @@ pub struct LogEntry {
     pub kind: u8, // 0 learning, 1 review, 2 relearning (Anki's revlog types), | MINUTES
 }
 pub const MINUTES: u8 = 0x80;
+/// A deck of mined words keeps its review log in matcha's own file too (same 24-byte records).
+fn log_file(key: &str) -> Option<String> { crate::mined::side_path(key, "log") }
 pub fn read_log(key: &str) -> Vec<LogEntry> {
-    read_file(&format!("{}.log", key)).unwrap_or_default().chunks_exact(24).map(|c| LogEntry {
+    let b = match log_file(key) { Some(p) => read(&p), None => read_file(&format!("{}.log", key)) };
+    b.unwrap_or_default().chunks_exact(24).map(|c| LogEntry {
         id: u64::from_le_bytes(c[0..8].try_into().unwrap()),
         time_ms: i64::from_le_bytes(c[8..16].try_into().unwrap()),
         interval: u16::from_le_bytes([c[16], c[17]]),
@@ -313,7 +467,7 @@ pub fn read_log(key: &str) -> Vec<LogEntry> {
 }
 pub fn write_log(key: &str, log: &[LogEntry]) -> bool {
     if log.is_empty() {
-        delete_file(&format!("{}.log", key));
+        match log_file(key) { Some(p) => { dsn::fs_delete(&p); } None => delete_file(&format!("{}.log", key)) }
         return true;
     }
     let mut b = Vec::with_capacity(log.len() * 24);
@@ -326,7 +480,7 @@ pub fn write_log(key: &str, log: &[LogEntry]) -> bool {
         b.push(e.kind);
         b.extend_from_slice(&[0, 0]);
     }
-    write_file(&format!("{}.log", key), &b)
+    match log_file(key) { Some(p) => write(&p, &b), None => write_file(&format!("{}.log", key), &b) }
 }
 
 /// A review done in Anki, folded into the device's progress: the device's FSRS gives the memory
@@ -393,6 +547,7 @@ pub struct DeckSummary {
 /// One summary per synced deck, by the name shown (an Anki subdeck by its last two levels).
 pub fn list_decks() -> Vec<DeckSummary> {
     let day = today();
+    let vacation = Settings::read().vacation;
     let mut out = Vec::new();
     for key in deck_keys() {
         let Some(info) = DeckInfo::read(&key) else { continue };
@@ -414,6 +569,7 @@ pub fn list_decks() -> Vec<DeckSummary> {
         let per_day = info.new_per_day.max(0) as u32;
         let fresh = unseen.min(per_day.saturating_sub(new_today as u32));
         let due = due.min(info.reviews_per_day.max(0) as u32);
+        let (due, fresh) = if vacation { (0, 0) } else { (due, fresh) };
         out.push(DeckSummary { key, label: short_name(&info.name), migaku: info.migaku, due, fresh });
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
@@ -540,7 +696,9 @@ impl Session {
         if s.leech_threshold > 0 && s.leech_suspend {
             s.leeches = read_leeches(key);
         }
-        s.queue_cards();
+        if !Settings::read().vacation {
+            s.queue_cards(); // on vacation: progress loaded, nothing queued
+        }
         s
     }
 
@@ -646,6 +804,8 @@ impl Session {
     pub fn finished(&self) -> bool { self.position >= self.queue.len() && self.learning.is_empty() }
     pub fn remaining(&self) -> usize { self.queue.len().saturating_sub(self.position) + self.learning.len() }
     pub fn reviewed(&self) -> usize { self.reviewed }
+    /// Whether the deck comes from the Migaku bridge rather than Anki.
+    pub fn is_migaku(&self) -> bool { self.info.as_ref().is_some_and(|i| i.migaku) }
     pub fn total(&self) -> usize { self.queue.len() + self.learning.len() }
     pub fn rating_count(&self, i: usize) -> u16 { self.rating_counts[i] }
 

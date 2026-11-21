@@ -20,6 +20,10 @@ A face can also be rasterized from an OpenType font, the way matcha's fontconver
       cjk     GB2312 and Big5 ideographs not already in skipface (the default)
       cjkall  kana, CJK punctuation, full-width forms and GB2312/Big5 ideographs
       digits  0-9
+      kr      cjkall and Hangul (jamo and syllables)
+      arabic  Arabic, its supplement and presentation forms A and B
+      hebrew  Hebrew and its presentation forms
+      text    Latin with Vietnamese, Greek, Cyrillic, marks and punctuation (card text)
       latin   Basic Latin, Latin-1, Latin Extended-A/B and general punctuation
 
 usage: matcha_fonts.py <matcha-reader checkout> <out dir> face=header[:min-max] ...
@@ -129,14 +133,26 @@ def existing(outdir):
 def charset(name):
     if name == 'digits':
         return range(0x30, 0x3A)
+    if name == 'arabic':
+        return list(range(0x0600, 0x0700)) + list(range(0x0750, 0x0780)) + list(range(0xFB50, 0xFE00)) + list(range(0xFE70, 0xFF00)) + [0x200C, 0x200D]
+    if name == 'hebrew':
+        return list(range(0x0590, 0x0600)) + list(range(0xFB1D, 0xFB50))
+    if name == 'text':  # card text: Latin (Vietnamese too), Greek, Cyrillic, combining marks, punctuation
+        return (list(range(0x20, 0x250)) + list(range(0x0300, 0x0370)) + list(range(0x0370, 0x0400)) + list(range(0x0400, 0x0530))
+                + list(range(0x1E00, 0x1F00)) + list(range(0x2000, 0x2070)) + list(range(0x20A0, 0x20C0)) + list(range(0x2100, 0x2200))
+                + list(range(0x2190, 0x2200)) + [0x25CF, 0x25CB, 0x25A0, 0x25A1, 0x2022, 0x2713, 0x2717])
     if name == 'latin':
         return list(range(0x20, 0x250)) + list(range(0x2000, 0x2070))
     out = []
-    if name == 'cjkall':
+    if name in ('cjkall', 'kr'):
         out += list(range(0x3000, 0x3100)) + list(range(0xFF00, 0xFFF0))
+    if name == 'kr':
+        out += list(range(0x3130, 0x3190)) + list(range(0xAC00, 0xD7A4))
     for cp in range(0x4E00, 0xA000):
         ch = chr(cp)
-        for enc in ('gb2312', 'big5'):
+        # Chinese standards, and the Japanese (JIS X 0208/0212) and Korean (KS X 1001) ones: kanji
+        # forms like 毎 or 対 are in none of the Chinese sets.
+        for enc in ('gb2312', 'big5', 'euc_jp', 'euc_jis_2004', 'euc_kr'):
             try:
                 ch.encode(enc)
                 out.append(cp)
@@ -157,7 +173,10 @@ def rasterize(path, points, skip, setname='cjk'):
             continue
         mask, (ox, oy) = font.getmask2(ch, mode='L', anchor='ls')
         w, h = mask.size
-        rows = [[mask.getpixel((x, y)) >= 64 for x in range(w)] for y in range(h)]
+        if w > 255 or h > 255:  # wider than the format holds (a few Arabic ligatures like U+FDFD)
+            continue
+        px = bytes(mask)
+        rows = [[px[y * w + x] >= 64 for x in range(w)] for y in range(h)]
         glyphs[cp] = (w, h, round(font.getlength(ch) * 16), ox, -oy, rows)
         cps.append((cp, cp))
     return (round(ascent * 1.2), ascent, -descent), cps, glyphs
@@ -173,7 +192,7 @@ def main():
             skip = existing(os.path.join(out, skipface)) if skipface else set()
             metrics, cps, glyphs = rasterize(path, int(points), skip, *setname)
             n, size = write_face(os.path.join(out, face), cps, glyphs, lo, hi)
-            print('%-6s %-28s ascender %d  %d files, %d bytes' % (face, os.path.basename(path), metrics[1], n, size))
+            print('%-6s %-28s ascender %d  %d files, %d bytes  line %d' % (face, os.path.basename(path), metrics[1], n, size, metrics[0]))
             continue
         if ':' in header:
             header, rng = header.split(':')

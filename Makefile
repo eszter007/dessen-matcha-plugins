@@ -18,7 +18,7 @@ dist/%/app.bin: plugins/%/*.c plugins/%/*.h plugins/%/*.json plugins/%/README.md
 	$(RISCV)gcc $(APPFLAGS) $(if $(APP_MEM_$*),-Wl$(comma)--defsym=APP_MEM=$(APP_MEM_$*)) $(SDK)/crt0.S $(SDK)/rt.c plugins/$*/$*.c -o build/$*.elf
 	$(RISCV)objcopy -O binary build/$*.elf $@
 	cp plugins/$*/*.json plugins/$*/README.md dist/$*/
-	for d in fonts stamps; do if [ -d plugins/$*/$$d ]; then rm -rf dist/$*/$$d && cp -R plugins/$*/$$d dist/$*/; fi; done
+	for d in fonts stamps hyph i18n; do if [ -d plugins/$*/$$d ]; then rm -rf dist/$*/$$d && cp -R plugins/$*/$$d dist/$*/; fi; done
 
 # A Rust plugin (plugins/<name>/Cargo.toml): a staticlib exporting main(), linked like a C app.
 dist/%/app.bin: plugins/%/Cargo.toml plugins/%/src/*.rs plugins/%/*.json plugins/%/README.md $(SDK)/dessen.rs $(SDK)/crt0.S $(SDK)/app.ld
@@ -29,7 +29,7 @@ dist/%/app.bin: plugins/%/Cargo.toml plugins/%/src/*.rs plugins/%/*.json plugins
 	  build/rust/$(RUST_TARGET)/release/lib$*.a -o build/$*.elf
 	$(RISCV)objcopy -O binary build/$*.elf $@
 	cp plugins/$*/*.json plugins/$*/README.md dist/$*/
-	for d in fonts stamps; do if [ -d plugins/$*/$$d ]; then rm -rf dist/$*/$$d && cp -R plugins/$*/$$d dist/$*/; fi; done
+	for d in fonts stamps hyph i18n; do if [ -d plugins/$*/$$d ]; then rm -rf dist/$*/$$d && cp -R plugins/$*/$$d dist/$*/; fi; done
 
 clean:
 	rm -rf build dist

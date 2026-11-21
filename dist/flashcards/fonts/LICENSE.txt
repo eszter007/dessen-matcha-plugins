@@ -2,7 +2,14 @@ Glyphs in this folder are extracted from matcha-reader's built-in UI fonts (Ubun
 Noto Sans, Noto Sans Hebrew and Noto Sans Arabic for extra scripts; Noto Sans CJK JP for the
 Japanese subsets; Noto Serif 14 for the card text) by tools/matcha_fonts.py. hero/ and n18b/
 are rasterized by the same tool from Noto Serif, k14/ from Noto Sans CJK SC. c8/ and c12/ are rasterized by the same tool from
-Noto Sans CJK SC (github.com/notofonts/noto-cjk). Their licences follow.
+Noto Sans CJK SC (github.com/notofonts/noto-cjk). n12/, n12b/, n12i/ are matcha's Noto Serif 12;
+sp/ is rasterized from Noto Serif Bold (40 pt); spk/, spkt/, spkj/, spmj/ and spkk/ from Noto
+Serif CJK SC, TC, JP (36 and 28 pt) and KR Bold set the word on a mined card's spine; cs*/ and cn*/ are rasterized from Noto Serif and
+Noto Sans (card text, 12-40 pt); k20*/ from Noto Sans CJK SC/JP/TC/KR; ar*/ and he*/ from Noto
+Sans Arabic and Noto Sans Hebrew (SIL Open Font License 1.1, notofonts); k14j/,
+k14t/ and k14k/ from Noto Sans CJK JP, TC and KR set its text in those languages. tc.bin marks
+the ideographs only Traditional Chinese uses. All from github.com/notofonts/noto-cjk, SIL Open
+Font License 1.1, as Noto Sans CJK below. Their licences follow.
 
 ========================================================================
 NotoSans and NotoSansExtended

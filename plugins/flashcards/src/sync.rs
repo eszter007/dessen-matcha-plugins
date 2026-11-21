@@ -8,6 +8,7 @@
 use crate::rpc::{Client, Error, Kind};
 use crate::store::{self, CardRecord, DeckInfo, Pulled};
 use crate::{html, png};
+use crate::i18n::{tr, trf, Arg};
 use alloc::{format, string::String, vec::Vec};
 use serde_json::{json, Value};
 
@@ -17,10 +18,11 @@ pub struct Service {
     pub url: String,
     pub key: String,
     pub decks: Vec<String>,
+    pub takes_mined: bool, // matcha's Mined Words To: this service gets the words mined while reading
 }
 
 pub fn services() -> Result<Vec<Service>, &'static str> {
-    let cfg = store::read_json("config.json").ok_or("Set the server address in config.json in the Flashcards plugin folder")?;
+    let cfg = store::read_json("config.json").ok_or("no_server")?;
     let s = |k: &str| String::from(cfg.get(k).and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('/'));
     let decks = |k: &str| -> Vec<String> {
         cfg.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|d| d.as_str().map(String::from)).collect())
@@ -33,16 +35,18 @@ pub fn services() -> Result<Vec<Service>, &'static str> {
         let base = if own.is_empty() { server.clone() } else { own };
         let own_key = s(&format!("{}Key", k));
         let wanted = decks(k);
-        if base.is_empty() || wanted.is_empty() {
+        let takes = (s("minedTo") == "migaku") == migaku && !crate::mined::languages().is_empty();
+        if base.is_empty() || (wanted.is_empty() && !takes) {
             continue;
         }
-        out.push(Service { name, migaku, url: base + path, key: if own_key.is_empty() { s("key") } else { own_key }, decks: wanted });
+        let takes_mined = (s("minedTo") == "migaku") == migaku;
+        out.push(Service { name, migaku, url: base + path, key: if own_key.is_empty() { s("key") } else { own_key }, decks: wanted, takes_mined });
     }
     if out.is_empty() {
         return Err(if server.is_empty() {
-            "Set the server address in config.json in the Flashcards plugin folder"
+            "no_server"
         } else {
-            "Name your Anki or Migaku decks in config.json in the Flashcards plugin folder"
+            "no_service"
         });
     }
     Ok(out)
@@ -50,6 +54,7 @@ pub fn services() -> Result<Vec<Service>, &'static str> {
 
 #[derive(Default)]
 pub struct Totals {
+    pub remote_skipped: bool, // AnkiWeb was not synced this time
     pub added: u32,
     pub pulled: u32,
     pub pushed: u32,
@@ -69,23 +74,49 @@ const RATING_NAMES: [&str; 4] = ["again", "hard", "good", "easy"];
 pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Totals, keys: &mut Vec<String>)
     -> Result<(), (String, Error)> {
     let mut client = Client::new(&svc.url, &svc.key);
-    let remote = |client: &mut Client| -> Result<(), Error> {
+    // matcha's syncRemote: without an AnkiWeb account the sync goes on locally. An AnkiWeb sync
+    // still running before the device's changes (it may wait for a full sync to be chosen in Anki)
+    // stops the sync, so the changes cannot land in a collection that full sync replaces. Any other
+    // AnkiWeb error is noted and the next sync tries again. For the Migaku bridge every failure stops.
+    let remote = |client: &mut Client, before_changes: bool, skipped: &mut bool| -> Result<(), Error> {
         match client.call_operation("collection.sync", json!({"includeMedia": false})) {
             Ok(_) => Ok(()),
-            // Without an AnkiWeb account the server syncs locally; the Migaku bridge needs its login.
-            Err(e) if !svc.migaku && e.kind == Kind::Rpc && e.kind_name != "timeout" => Ok(()),
-            Err(e) => Err(e),
+            Err(e) if svc.migaku => Err(e),
+            Err(e) if e.kind_name == "authenticationRequired" => Ok(()),
+            Err(e) if e.kind != Kind::Rpc => Err(e),
+            Err(e) if before_changes && e.kind_name == "timeout" => {
+                Err(Error { kind: Kind::Rpc, kind_name: String::from("remoteBlocked"), message: e.message })
+            }
+            Err(_) => {
+                *skipped = true;
+                Ok(())
+            }
         }
     };
-    progress.show(&format!("Syncing {}", svc.name), "");
-    remote(&mut client).map_err(|e| (String::from(svc.name), e))?;
+    progress.show(&trf("syncing", &[Arg::S(svc.name)]), "");
+    remote(&mut client, true, &mut totals.remote_skipped).map_err(|e| (String::from(svc.name), e))?;
+    // Words mined in matcha first: their deck then syncs with the others (and from now on).
+    let mut wanted_decks = svc.decks.clone();
+    if svc.takes_mined {
+        let handed = crate::handover::hand_over(&mut client, svc.migaku, &mut totals.added)
+            .map_err(|e| (String::from(svc.name), e))?;
+        let cfg_key = if svc.migaku { "migaku" } else { "anki" };
+        for d in handed {
+            if !wanted_decks.contains(&d) {
+                wanted_decks.push(d);
+            }
+        }
+        if wanted_decks.len() > svc.decks.len() {
+            store::set_config(cfg_key, json!(wanted_decks));
+        }
+    }
     let decks = client.call("decks.list", json!({})).map_err(|e| (String::new(), e))?;
     let list = decks.as_array().cloned().unwrap_or_default();
-    for wanted in &svc.decks {
+    for wanted in &wanted_decks {
         let found = list.iter().find(|d| d.get("name").and_then(|n| n.as_str()) == Some(wanted.as_str()));
         let Some(d) = found else {
             return Err((wanted.clone(), Error { kind: Kind::Rpc, kind_name: String::from("deckMissing"),
-                                               message: format!("{} has no deck named {}", svc.name, wanted) }));
+                                               message: trf("deck_missing", &[Arg::S(svc.name), Arg::S(wanted)]) }));
         };
         let server_id = String::from(d.get("id").and_then(|v| v.as_str()).unwrap_or(""));
         let preset = String::from(d.get("presetId").and_then(|v| v.as_str()).unwrap_or(""));
@@ -93,7 +124,7 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
         sync_deck(&mut client, svc, wanted, &key, &server_id, &preset, progress, totals).map_err(|e| (wanted.clone(), e))?;
         keys.push(key);
     }
-    remote(&mut client).map_err(|e| (String::from(svc.name), e))?;
+    remote(&mut client, false, &mut totals.remote_skipped).map_err(|e| (String::from(svc.name), e))?;
     Ok(())
 }
 
@@ -102,12 +133,13 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
              progress: &mut dyn Progress, totals: &mut Totals) -> Result<(), Error> {
     let mut info = DeckInfo::read(key).unwrap_or_else(|| DeckInfo::new(key, name, svc.migaku, server_id));
     info.name = String::from(name);
-    let title = format!("Syncing {}", name);
+    let title = trf("syncing", &[Arg::S(name)]);
     progress.show(&title, "");
     if !preset.is_empty() {
         if let Ok(p) = client.call("deckPresets.get", json!({"preset": {"id": preset}})) {
             if let Some(s) = p.get("settings") {
                 info.apply_preset(s);
+                info.preset = true;
             }
         }
     }
@@ -152,18 +184,49 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
             }
         }
     }
+    // Words mined in matcha ("Matcha sentence" notes) keep their fields: they are drawn as matcha
+    // draws its own cards, the word on a spine beside the sentence.
+    let mut mined: Vec<(u64, String)> = Vec::new();
+    let new_notes: Vec<u64> = notes.iter().filter(|n| missing.contains(&n.0)).map(|n| n.1).collect();
+    for chunk in new_notes.chunks(20) {
+        let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
+        let got = client.call("notes.getMany", json!({"ids": list}))?;
+        for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(r) = item.get("result") {
+                if r.pointer("/noteType/name").and_then(|v| v.as_str()) == Some(store::MINED_NOTE_TYPE) {
+                    mined.push((id_str(&r["id"]), store::encode_mined(&r["fields"])));
+                }
+            }
+        }
+    }
     // Each new card's two sides, as plain text, and its pictures as 1-bit images.
     for (n, id) in missing.iter().enumerate() {
         if n % 5 == 0 {
             progress.show(&title, &format!("{} / {}", n, missing.len()));
         }
+        let note = notes.iter().find(|x| x.0 == *id).map(|x| x.1);
+        if let Some(m) = note.and_then(|nid| mined.iter().find(|m| m.0 == nid)) {
+            sides.push((*id, m.1.clone(), String::new()));
+            totals.added += 1;
+            continue;
+        }
         let r = client.call("cards.render", json!({"id": format!("{}", id)}))?;
-        let q = html::to_side(r.get("questionHtml").and_then(|v| v.as_str()).unwrap_or(""));
-        let a = html::to_side(r.get("answerHtml").and_then(|v| v.as_str()).unwrap_or(""));
+        let qh = r.get("questionHtml").and_then(|v| v.as_str()).unwrap_or("");
+        let ah = r.get("answerHtml").and_then(|v| v.as_str()).unwrap_or("");
+        let q = html::to_side(qh);
+        let a = html::to_side(ah);
         for img in q.images.iter().chain(a.images.iter()) {
             fetch_image(client, img);
         }
-        sides.push((*id, q.side, a.side));
+        // The sides as HTML with their note type's CSS (kept once per style), laid out as Anki
+        // styles them (cardhtml.rs).
+        let css = r.get("css").and_then(|v| v.as_str()).unwrap_or("");
+        let css_file = format!("css-{}", &image_file(css)[4..12]);
+        if store::read_file(&format!("{}.css", css_file)).is_none() {
+            store::write_file(&format!("{}.css", css_file), css.as_bytes());
+        }
+        let styled = |h: &str| format!("{}{}\u{1f}{}", store::HTML_MARK, css_file, h);
+        sides.push((*id, styled(qh), styled(ah)));
         totals.added += 1;
     }
     for id in &ids {
@@ -172,7 +235,7 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
     }
     sides.retain(|s| ids.contains(&s.0));
     if !store::write_sides(key, &sides) || !store::write_ids(key, &records) {
-        return Err(Error { kind: Kind::Reply, kind_name: String::new(), message: String::from("SD card write failed") });
+        return Err(Error { kind: Kind::Reply, kind_name: String::new(), message: tr("sd_failed") });
     }
     progress.show(&title, "");
     // Pull before push: Anki's reviews land first, then the device's own go out on top.
@@ -365,12 +428,12 @@ fn push_reviews(client: &mut Client, info: &mut DeckInfo, in_anki: &[u64], total
 /// What a failed sync says, by what went wrong (matcha's errorText).
 pub fn error_text(svc: &str, e: &Error) -> String {
     match &e.kind {
-        Kind::Network | Kind::Http(_) => format!("Could not reach the {} server at this address", svc),
-        Kind::Unauthorized => format!("The {} server refused the key", svc),
-        Kind::Reply => format!("The {} server sent an unexpected reply", svc),
+        Kind::Network | Kind::Http(_) => trf("unreachable", &[Arg::S(svc)]),
+        Kind::Unauthorized => trf("key_refused", &[Arg::S(svc)]),
+        Kind::Reply => trf("reply_error", &[Arg::S(svc)]),
         Kind::Rpc if e.kind_name == "deckMissing" => e.message.clone(),
-        Kind::Rpc if svc == "Migaku" && e.kind_name == "authenticationRequired" => String::from(
-            "Migaku did not accept the server's login, or the server has none. Check the Migaku login on the server"),
+        Kind::Rpc if e.kind_name == "remoteBlocked" => tr("ankiweb_needs_anki"),
+        Kind::Rpc if svc == "Migaku" && e.kind_name == "authenticationRequired" => tr("migaku_not_set_up"),
         Kind::Rpc => format!("{}: {}", svc, if e.message.is_empty() { &e.kind_name } else { &e.message }),
     }
 }

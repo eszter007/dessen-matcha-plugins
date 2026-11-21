@@ -1,13 +1,21 @@
 #![no_std]
 extern crate alloc;
 
+mod cardfaces;
+mod cardhtml;
 mod dsn;
 mod fsrs;
 mod gfx;
+mod handover;
 mod html;
+mod hyph;
+mod i18n;
 mod icons;
+mod mined;
 mod png;
 mod rpc;
+mod rtl;
+mod spine;
 mod store;
 mod sync;
 mod tabbar;

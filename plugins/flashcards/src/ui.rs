@@ -5,6 +5,7 @@ use crate::gfx::{self, Canvas, SMALL, UI10, UI10B, UI12, UI12B, CARD, CARDB, HER
 use crate::store::{self, DeckSummary, Interval, Session};
 use crate::tabbar::{self, Bar, Tab};
 use crate::{dsn, fsrs, icons, sync};
+use crate::i18n::{tr, trf, count, Arg};
 use alloc::{format, string::String, vec::Vec};
 
 static mut SCREEN: (i32, i32) = (480, 800);
@@ -19,7 +20,9 @@ const HDR_HEIGHT: i32 = 84;
 const HDR_STRIP: i32 = 20;
 const HDR_SIDE: i32 = 18;
 fn band_top() -> i32 { (HDR_TOP - unsafe { INSET_TOP }).max(0) }
+/// The screen's title; a key of the word list, or text shown as it is.
 fn header(title: &str) {
+    let title = &tr(title);
     let (w, _) = screen();
     let top = band_top();
     let b = dsn::battery();
@@ -38,7 +41,9 @@ fn header(title: &str) {
         gfx::text(gx - 6 - tw, top + (HDR_STRIP - SMALL.line_h) / 2, SMALL, &pct, dsn::BLACK);
     }
     let row_top = top + HDR_STRIP;
-    gfx::text(HDR_SIDE, row_top + (HDR_HEIGHT - HDR_STRIP - UI12B.line_h) / 2 - 2, UI12B, title, dsn::BLACK);
+    // Right to left: the title stands at the right (the settings icon then sits at the left).
+    let tx = if crate::i18n::rtl() { w - HDR_SIDE - gfx::text_width(UI12B, title) } else { HDR_SIDE };
+    gfx::text(tx, row_top + (HDR_HEIGHT - HDR_STRIP - UI12B.line_h) / 2 - 2, UI12B, title, dsn::BLACK);
 }
 fn content_top() -> i32 { band_top() + HDR_HEIGHT }
 
@@ -54,6 +59,7 @@ fn hints(labels: [&str; 4]) {
         if l.is_empty() {
             continue;
         }
+        let l = &tr(l);
         let x = 12 + i as i32 * (bw + 12) + if i >= 2 { 8 } else { 0 };
         dsn::stroke(x, h - HINTS_H + 6, bw - 8, HINTS_H, dsn::BLACK, 1, 6);
         gfx::text_centered(x + (bw - 8) / 2, h - HINTS_H + 14, SMALL, l, dsn::BLACK);
@@ -83,6 +89,7 @@ struct DeckList {
 
 impl DeckList {
     fn load() -> DeckList {
+        crate::mined::import();
         let services = sync::services();
         DeckList {
             decks: store::list_decks(),
@@ -96,24 +103,41 @@ impl DeckList {
         }
     }
     fn rows(&self) -> i32 { self.decks.len() as i32 + self.sync_row as i32 }
+    /// The settings icon beside the title is the row above the first (index -1).
+    fn settings_row(&self) -> i32 { -1 }
     fn due_total(&self) -> u32 { self.decks.iter().map(|d| d.due + d.fresh).sum() }
     fn hero_height(&self) -> i32 {
         (if self.due_total() > 0 { HERO_NUM.line_h * 3 / 4 + NUMERAL_GAP } else { 0 }) + UI12.line_h + ORNAMENT_ABOVE + ORNAMENT_BELOW
     }
 
+    /// Settings: an icon at the right end of the title row (matcha's tab icon for Settings).
+    fn settings_icon_rect() -> Rect {
+        let (w, _) = screen();
+        let y = band_top() + HDR_STRIP + (HDR_HEIGHT - HDR_STRIP - 32) / 2 - 2;
+        Rect { x: if crate::i18n::rtl() { HDR_SIDE } else { w - HDR_SIDE - 32 }, y, w: 32, h: 32 }
+    }
+    fn draw_settings_icon(&self) {
+        let r = Self::settings_icon_rect();
+        if self.selected == self.settings_row() && self.band.is_none() {
+            dsn::stroke(r.x - 8, r.y - 8, r.w + 16, r.h + 16, dsn::BLACK, 2, 10);
+        }
+        gfx::icon(r.x, r.y, 32, &crate::tabicons::SETTINGS_TAB_ICON, dsn::BLACK);
+    }
     fn draw(&mut self) {
         let (w, h) = screen();
         dsn::clear();
-        header("Flashcards");
+        gfx::set_script(gfx::detect_script(self.decks.iter().map(|d| d.label.as_str())));
+        header("flashcards");
         self.row_ys.clear();
         let left = SIDE_PAD + ROW_INSET;
         let right = w - SIDE_PAD - ROW_INSET;
         let _ = h;
         let h = tabbar::Bar::top(); // the tab bar takes the place of the button hints
+        self.draw_settings_icon();
         if self.rows() == 0 {
             let mid = (content_top() + h) / 2;
-            gfx::text_centered(w / 2, mid - 40, UI12B, "No decks yet", dsn::BLACK);
-            let msg = self.hint.unwrap_or("Name your Anki or Migaku decks in config.json, then sync.");
+            gfx::text_centered(w / 2, mid - 40, UI12B, &tr("no_decks"), dsn::BLACK);
+            let msg = &tr(self.hint.unwrap_or("setup_hint"));
             for (i, l) in gfx::wrap(UI10, msg, w - 80).iter().enumerate().take(4) {
                 gfx::text_centered(w / 2, mid - 8 + i as i32 * UI10.line_h, UI10, l, dsn::BLACK);
             }
@@ -131,9 +155,11 @@ impl DeckList {
             let n = format!("{}", due);
             gfx::text_centered(w / 2, y - HERO_NUM.line_h / 8, HERO_NUM, &n, dsn::BLACK);
             y += HERO_NUM.line_h * 3 / 4 + NUMERAL_GAP;
-            String::from(if due == 1 { "card to review" } else { "cards to review" })
+            count("to_review", due as i64)
+        } else if store::Settings::read().vacation {
+            tr("on_vacation")
         } else {
-            String::from("Nothing due today")
+            tr("nothing_due")
         };
         let cw = gfx::text_width(UI12, &caption);
         gfx::text(w / 2 - cw / 2, y, UI12, &caption, dsn::BLACK);
@@ -152,7 +178,7 @@ impl DeckList {
         let bottom = h;
         let fit = ((bottom - list_top) / ROW_PITCH).max(1);
         if self.selected < self.top_row {
-            self.top_row = self.selected;
+            self.top_row = self.selected.max(0);
         }
         if self.selected >= self.top_row + fit {
             self.top_row = self.selected - fit + 1;
@@ -166,7 +192,7 @@ impl DeckList {
             let focused = i == self.selected && self.band.is_none();
             if self.sync_row && i == self.decks.len() as i32 {
                 // Like Insights' Refresh row: icon and small text, outlined only while focused.
-                let label = "Sync Flashcards";
+                let label = &tr("sync_flashcards");
                 let row_w = 24 + 8 + gfx::text_width(SMALL, label);
                 let rx = (left + right - row_w) / 2;
                 if focused {
@@ -185,10 +211,13 @@ impl DeckList {
             let value = format!("{}", d.due + d.fresh);
             let vw = gfx::text_width(UI12, &value);
             let name = gfx::truncated(UI12, &d.label, right - left - vw - 24);
-            gfx::text(left, ty, UI12, &name, dsn::BLACK);
-            gfx::text(right - vw, ty, UI12, &value, dsn::BLACK);
-            let mut x = left + gfx::text_width(UI12, &name) + 12;
-            while x < right - vw - 12 {
+            let nw = gfx::text_width(UI12, &name);
+            let rtl = crate::i18n::rtl();
+            // Right to left: the name at the right, its count at the left.
+            gfx::text(if rtl { right - nw } else { left }, ty, UI12, &name, dsn::BLACK);
+            gfx::text(if rtl { left } else { right - vw }, ty, UI12, &value, dsn::BLACK);
+            let (mut x, end) = if rtl { (left + vw + 12, right - nw - 12) } else { (left + nw + 12, right - vw - 12) };
+            while x < end {
                 dsn::fill(x, baseline - 1, 1, 1, dsn::BLACK);
                 x += 5;
             }
@@ -221,6 +250,7 @@ enum Item {
     Rule,
     Image(Canvas),
     Missing,
+    Styled(Vec<crate::cardhtml::Item>), // a whole page of an Anki card laid out with its CSS
 }
 fn item_height(it: &Item) -> i32 {
     match it {
@@ -228,6 +258,7 @@ fn item_height(it: &Item) -> i32 {
         Item::Rule => 30,
         Item::Image(c) => c.h + 12,
         Item::Missing => 72,
+        Item::Styled(_) => 0,
     }
 }
 fn load_image(name: &str) -> Item {
@@ -303,16 +334,16 @@ fn draw_rich(cx: i32, y: i32, line: &str) {
 fn format_interval(i: Interval) -> String {
     let v = i.value as u32;
     if i.minutes {
-        return if v < 60 { format!("{}m", v) } else { format!("{}h", (v + 30) / 60) };
+        return if v < 60 { trf("interval_m", &[Arg::N(v as i64)]) } else { trf("interval_h", &[Arg::N(((v + 30) / 60) as i64)]) };
     }
     match v {
-        0 => String::from("<1d"),
-        1..=29 => format!("{}d", v),
-        30..=364 => format!("{}mo", (v + 15) / 30),
-        _ => format!("{}.{}y", v / 365, (v % 365) * 10 / 365),
+        0 => tr("interval_lt1d"),
+        1..=29 => trf("interval_d", &[Arg::N(v as i64)]),
+        30..=364 => trf("interval_mo", &[Arg::N(((v + 15) / 30) as i64)]),
+        _ => trf("interval_y", &[Arg::S(&format!("{}.{}", v / 365, (v % 365) * 10 / 365))]),
     }
 }
-const RATINGS: [&str; 4] = ["Again", "Hard", "Good", "Easy"];
+const RATINGS: [&str; 4] = ["again", "hard", "good", "easy"];
 
 struct Review {
     session: Session,
@@ -321,11 +352,13 @@ struct Review {
     pages: Vec<Vec<Item>>,
     page: usize,
     intervals: [Interval; 4],
+    mined: Option<store::Mined>, // a word mined in matcha: drawn on matcha's spine card
+    keys: bool,                  // a key was used: the selected rating is shown, touch board or not
 }
 
 impl Review {
     fn open(key: &str) -> Review {
-        let mut r = Review { session: Session::open(key), show_back: false, selected: 2, pages: Vec::new(), page: 0, intervals: Default::default() };
+        let mut r = Review { session: Session::open(key), show_back: false, selected: 2, pages: Vec::new(), page: 0, intervals: Default::default(), mined: None, keys: false };
         r.load_card();
         r
     }
@@ -337,8 +370,26 @@ impl Review {
     }
     fn layout_side(&mut self) {
         self.page = 0;
+        self.mined = self.session.current().and_then(|c| store::decode_mined(c.0));
+        // An Anki card's CJK text in the cut of its language, read from both sides.
+        if let Some((f, b, _)) = self.session.current() {
+            gfx::set_script(gfx::detect_script([f, b].into_iter()));
+        }
+        if self.mined.is_some() {
+            self.pages = Vec::new();
+            return;
+        }
         self.pages = match self.session.current() {
-            Some((f, b, false)) => layout(if self.show_back { b } else { f }),
+            Some((f, b, false)) => {
+                let side = if self.show_back { b } else { f };
+                match store::decode_html(side) {
+                    Some((css, html)) => {
+                        let body = body_rect();
+                        crate::cardhtml::layout(html, &css, body.w, body.h).into_iter().map(|p| alloc::vec![Item::Styled(p)]).collect()
+                    }
+                    None => layout(side),
+                }
+            }
             _ => Vec::new(),
         };
     }
@@ -360,9 +411,16 @@ impl Review {
         dsn::stroke(c.x + 6, c.y + 6, c.w - 12, c.h - 12, dsn::BLACK, 1, 0);
         let body = body_rect();
         let cx = body.x + body.w / 2;
-        if self.pages.is_empty() || self.pages.iter().all(|p| p.is_empty()) {
+        if let Some(m) = &self.mined {
+            crate::spine::draw(m, &crate::spine::Rect { x: c.x + 6, y: c.y + 6, w: c.w - 12, h: c.h - 12 }, self.show_back);
+        } else if self.pages.is_empty() || self.pages.iter().all(|p| p.is_empty()) {
             let too_large = self.session.current().is_some_and(|c| c.2);
-            let msg = if too_large { "This card is too large for the device" } else { "This card could not be read" };
+            let msg = match (too_large, self.session.is_migaku()) {
+                (true, false) => tr("too_large_anki"),
+                (true, true) => tr("too_large_migaku"),
+                _ => tr("card_error"),
+            };
+            let msg = msg.as_str();
             let lines = gfx::wrap(UI12, msg, c.w - 52);
             let top = c.y + (c.h - lines.len() as i32 * UI12.line_h) / 2;
             for (i, l) in lines.iter().enumerate() {
@@ -376,6 +434,7 @@ impl Review {
                     Item::Rule => dsn::fill(cx - body.w / 8, y + 14, body.w / 4, 2, dsn::BLACK),
                     Item::Image(img) => gfx::blit(img, cx - img.w / 2, y + 6, dsn::BLACK),
                     Item::Missing => dsn::stroke(cx - 40, y + 6, 80, 60, dsn::BLACK, 1, 0),
+                    Item::Styled(items) => crate::cardhtml::draw(items, body.x, y, body.w),
                 }
                 y += item_height(it);
             }
@@ -391,9 +450,9 @@ impl Review {
         } else {
             let counter = format!("{} / {}", self.session.reviewed() + 1, self.session.reviewed() + self.session.remaining());
             gfx::text_centered(w / 2, band.y + 10, SMALL, &counter, dsn::BLACK);
-            gfx::text_centered(w / 2, band.y + 34, UI10, if touch() { "Tap to turn" } else { "Turn" }, dsn::BLACK);
+            gfx::text_centered(w / 2, band.y + 34, UI10, &tr(if touch() { "tap_to_turn" } else { "turn" }), dsn::BLACK);
         }
-        hints(["« Back", if self.show_back { "Rate" } else { "Turn" }, if self.show_back { "<" } else { "" }, if self.show_back { ">" } else { "" }]);
+        hints(["back", if self.show_back { "rate" } else { "turn" }, if self.show_back { "<" } else { "" }, if self.show_back { ">" } else { "" }]);
         dsn::refresh();
     }
 
@@ -404,15 +463,17 @@ impl Review {
         let box_w = (band.w - 3 * GAP) / 4;
         let text_top = band.y + (BOX_H - UI10B.line_h - SMALL.line_h - 2) / 2;
         for i in 0..4 {
-            let bx = band.x + i as i32 * (box_w + GAP);
-            let filled = !touch() && i == self.selected;
+            // Right to left: Again at the right, Easy at the left.
+            let slot = if crate::i18n::rtl() { 3 - i as i32 } else { i as i32 };
+            let bx = band.x + slot * (box_w + GAP);
+            let filled = (!touch() || self.keys) && i == self.selected;
             if filled {
                 dsn::fill_round(bx, band.y, box_w, BOX_H, dsn::BLACK, 10);
             } else {
                 dsn::stroke(bx, band.y, box_w, BOX_H, dsn::BLACK, 2, 10);
             }
             let ink = if filled { dsn::WHITE } else { dsn::BLACK };
-            gfx::text_centered(bx + box_w / 2, text_top, UI10B, RATINGS[i], ink);
+            gfx::text_centered(bx + box_w / 2, text_top, UI10B, &tr(RATINGS[i]), ink);
             gfx::text_centered(bx + box_w / 2, text_top + UI10B.line_h + 2, SMALL, &format_interval(self.intervals[i]), ink);
         }
     }
@@ -428,10 +489,10 @@ impl Review {
         dsn::line(cx - 20, y + 44, cx - 6, y + 58, 3, dsn::BLACK);
         dsn::line(cx - 6, y + 58, cx + 22, y + 28, 3, dsn::BLACK);
         y += SEAL + 30;
-        gfx::text_centered(cx, y, SERIF18B, "All caught up", dsn::BLACK);
+        gfx::text_centered(cx, y, SERIF18B, &tr("all_caught_up"), dsn::BLACK);
         y += SERIF18B.line_h + 6;
         let n = self.session.reviewed();
-        gfx::text_centered(cx, y, UI10, &format!("{} card{} reviewed", n, if n == 1 { "" } else { "s" }), dsn::BLACK);
+        gfx::text_centered(cx, y, UI10, &count("cards_reviewed", n as i64), dsn::BLACK);
         y += 48;
         let gap = 10;
         let box_w = (a.w - 3 * gap) / 4;
@@ -439,11 +500,11 @@ impl Review {
             let bx = a.x + i as i32 * (box_w + gap);
             dsn::stroke(bx, y, box_w, 96, dsn::BLACK, 2, 10);
             gfx::text_centered(bx + box_w / 2, y + 10, SERIF18B, &format!("{}", self.session.rating_count(i)), dsn::BLACK);
-            gfx::text_centered(bx + box_w / 2, y + 96 - 30, UI10, RATINGS[i], dsn::BLACK);
+            gfx::text_centered(bx + box_w / 2, y + 96 - 30, UI10, &tr(RATINGS[i]), dsn::BLACK);
         }
         let by = a.y + a.h - 56 - 8;
         dsn::fill_round(a.x, by, a.w, 56, dsn::BLACK, 12);
-        gfx::text_centered(cx, by + (56 - UI12B.line_h) / 2, UI12B, "Flashcards", dsn::WHITE);
+        gfx::text_centered(cx, by + (56 - UI12B.line_h) / 2, UI12B, &tr("flashcards"), dsn::WHITE);
         let _ = h;
     }
 
@@ -458,6 +519,9 @@ impl Review {
             let t = dsn::ev_type(e);
             let done = self.session.finished();
             let multi = self.pages.len() > 1;
+            if matches!(t, dsn::EV_CONFIRM | dsn::EV_NEXT | dsn::EV_PREV) {
+                self.keys = true;
+            }
             match t {
                 dsn::EV_BACK => break,
                 _ if done => {
@@ -470,7 +534,8 @@ impl Review {
                     let (x, y) = (dsn::ev_x(e), dsn::ev_y(e));
                     let band = ratings_rect();
                     if self.show_back && band.contains(x, y) {
-                        self.rate(((x - band.x) * 4 / band.w.max(1)).clamp(0, 3) as usize);
+                        let slot = ((x - band.x) * 4 / band.w.max(1)).clamp(0, 3) as usize;
+                        self.rate(if crate::i18n::rtl() { 3 - slot } else { slot });
                     } else if card_rect().contains(x, y) {
                         self.show_back = !self.show_back;
                         self.layout_side();
@@ -507,7 +572,7 @@ impl SyncScreen {
         header(&self.title);
         let top = (content_top() + safe_bottom()) / 2 - 40;
         if failed {
-            gfx::text_centered(w / 2, top - 40, UI12B, "Sync stopped", dsn::BLACK);
+            gfx::text_centered(w / 2, top - 40, UI12B, &tr("sync_stopped"), dsn::BLACK);
         }
         for (i, l) in gfx::wrap(UI10, message, w - 60).iter().enumerate().take(4) {
             gfx::text_centered(w / 2, top + i as i32 * UI10.line_h, UI10, l, dsn::BLACK);
@@ -516,7 +581,7 @@ impl SyncScreen {
             gfx::text_centered(w / 2, top + 110, UI10, detail, dsn::BLACK);
         }
         if finished {
-            hints(["« Back", "Done", "", ""]);
+            hints(["back", "done", "", ""]);
         }
         let _ = h;
         dsn::refresh();
@@ -527,18 +592,18 @@ impl sync::Progress for SyncScreen {
 }
 
 fn run_sync() {
-    let mut screen_ = SyncScreen { title: String::from("Sync Flashcards") };
+    let mut screen_ = SyncScreen { title: tr("sync_flashcards") };
     let services = match sync::services() {
         Ok(s) => s,
         Err(msg) => {
-            screen_.draw(true, msg, "", true);
+            screen_.draw(true, &tr(msg), "", true);
             wait_dismiss();
             return;
         }
     };
-    screen_.draw(false, "Connecting to Wi-Fi", "", false);
+    screen_.draw(false, &tr("connecting_wifi"), "", false);
     if dsn::wifi_connect() != 0 {
-        screen_.draw(true, "Could not connect to Wi-Fi", "", true);
+        screen_.draw(true, &tr("wifi_failed"), "", true);
         wait_dismiss();
         return;
     }
@@ -552,9 +617,12 @@ fn run_sync() {
                 if !summary.is_empty() {
                     summary += "; ";
                 }
-                summary += &format!("{}: {} new card{}, {} review{} received, {} sent", svc.name, totals.added,
-                                    if totals.added == 1 { "" } else { "s" }, totals.pulled,
-                                    if totals.pulled == 1 { "" } else { "s" }, totals.pushed);
+                summary += &trf("service_done", &[Arg::S(svc.name), Arg::S(&count("new_cards", totals.added as i64)),
+                                                  Arg::S(&count("reviews_received", totals.pulled as i64)), Arg::N(totals.pushed as i64)]);
+                if totals.remote_skipped {
+                    summary += ". ";
+                    summary += &tr("ankiweb_not_synced");
+                }
             }
             Err((deck, e)) => {
                 failure = Some(if deck.is_empty() { sync::error_text(svc.name, &e) } else {
@@ -578,6 +646,38 @@ fn run_sync() {
     }
     wait_dismiss();
 }
+/// matcha's Test Connection: each service's server asked for its decks, without syncing.
+fn test_connection() {
+    let screen_ = SyncScreen { title: tr("test_connection") };
+    let services = match sync::services() {
+        Ok(s) => s,
+        Err(msg) => {
+            screen_.draw(true, &tr(msg), "", true);
+            wait_dismiss();
+            return;
+        }
+    };
+    screen_.draw(false, &tr("connecting_wifi"), "", false);
+    if dsn::wifi_connect() != 0 {
+        screen_.draw(true, &tr("wifi_failed"), "", true);
+        wait_dismiss();
+        return;
+    }
+    let mut lines = Vec::new();
+    let mut failed = false;
+    for svc in &services {
+        let mut client = crate::rpc::Client::new(&svc.url, &svc.key);
+        match client.call("decks.list", serde_json::json!({})) {
+            Ok(_) => lines.push(trf("connected", &[Arg::S(svc.name)])),
+            Err(e) => {
+                failed = true;
+                lines.push(sync::error_text(svc.name, &e));
+            }
+        }
+    }
+    screen_.draw(failed, &lines.join("\n"), "", true);
+    wait_dismiss();
+}
 fn wait_dismiss() {
     loop {
         let t = dsn::ev_type(dsn::wait_event());
@@ -585,6 +685,219 @@ fn wait_dismiss() {
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------- the settings
+/// matcha's Settings > Flashcards and Flashcards Sync pages, as one list: the scheduling
+/// settings, vacation mode, and the sync's server, key and decks (all kept in config.json).
+enum Row {
+    Section(&'static str),
+    Page(&'static str, &'static str, &'static [Row]), // label, page title, its rows
+    Choice(&'static str, &'static str, &'static [&'static str]), // label, config key, choices
+    Toggle(&'static str, &'static str),
+    Text(&'static str, &'static str, bool),  // label, config key, secret
+    List(&'static str, &'static str),        // decks, comma separated
+    Pick(&'static str, &'static str, &'static [(&'static str, &'static str)]), // label, key, (value, shown)
+    Text2(&'static str, &'static str, bool), // an own server or key: shows the shared one when unset
+    Action(&'static str),                    // Test Connection
+}
+const SCHEDULING_ROWS: [Row; 5] = [
+    Row::Choice("retention", "retention", &["80%", "85%", "90%", "95%"]),
+    Row::Choice("new_per_day", "newPerDay", &["5", "10", "20", "30", "50"]),
+    Row::Choice("max_interval", "maxInterval", &["one_month", "six_months", "one_year", "no_limit"]),
+    Row::Toggle("vacation_mode", "vacation"),
+    Row::Section("scheduling_note"),
+];
+const SYNC_ROWS: [Row; 11] = [
+    Row::Text("server_address", "server", false),
+    Row::Text("server_key", "key", true),
+    Row::List("anki_decks", "anki"),
+    Row::List("migaku_decks", "migaku"),
+    Row::Pick("mined_to", "minedTo", &[("anki", "Anki"), ("migaku", "Migaku")]),
+    Row::Text2("anki_server", "ankiServer", false),
+    Row::Text2("anki_key", "ankiKey", true),
+    Row::Text2("migaku_server", "migakuServer", false),
+    Row::Text2("migaku_key", "migakuKey", true),
+    Row::Action("test_connection"),
+    Row::Section("sync_note"),
+];
+const SETTINGS_ROWS: [Row; 2] = [
+    Row::Page("scheduling", "scheduling", &SCHEDULING_ROWS),
+    Row::Page("flashcards_sync", "flashcards_sync", &SYNC_ROWS),
+];
+const CHOICE_DEFAULTS: [(&str, u64); 3] = [("retention", 2), ("newPerDay", 1), ("maxInterval", 3)];
+
+struct SettingsScreen {
+    title: &'static str,
+    rows: &'static [Row],
+    selected: usize,
+    row_ys: Vec<(usize, i32)>,
+}
+impl SettingsScreen {
+    fn new() -> SettingsScreen { SettingsScreen::page("settings", &SETTINGS_ROWS) }
+    fn page(title: &'static str, rows: &'static [Row]) -> SettingsScreen {
+        let first = rows.iter().position(|r| !matches!(r, Row::Section(_))).unwrap_or(0);
+        SettingsScreen { title, rows, selected: first, row_ys: Vec::new() }
+    }
+    fn value(row: &Row) -> String {
+        let cfg = store::read_json("config.json").unwrap_or(serde_json::Value::Null);
+        match row {
+            Row::Choice(_, k, choices) => {
+                let d = CHOICE_DEFAULTS.iter().find(|c| c.0 == *k).map(|c| c.1).unwrap_or(0);
+                let i = cfg.get(*k).and_then(|v| v.as_u64()).unwrap_or(d) as usize;
+                tr(choices[i.min(choices.len() - 1)])
+            }
+            Row::Toggle(_, k) => tr(if cfg.get(*k).and_then(|v| v.as_bool()).unwrap_or(false) { "on" } else { "off" }),
+            Row::Text(_, k, secret) => {
+                let v = cfg.get(*k).and_then(|v| v.as_str()).unwrap_or("");
+                if v.is_empty() { tr("not_set") } else if *secret { "•".repeat(v.chars().count().min(8)) } else { String::from(v) }
+            }
+            Row::List(_, k) => {
+                let names: Vec<String> = cfg.get(*k).and_then(|v| v.as_array()).map(|a| {
+                    a.iter().filter_map(|d| d.as_str().map(String::from)).collect()
+                }).unwrap_or_default();
+                if names.is_empty() { tr("none") } else { names.join(", ") }
+            }
+            Row::Page(_, _, rows) => {
+                // What the page holds, in short: its choices, or the server's host.
+                let parts: Vec<String> = rows.iter().filter_map(|r| match r {
+                    Row::Choice(..) => Some(Self::value(r)),
+                    Row::Toggle(l, k) if store::read_json("config.json").and_then(|c| c.get(*k).and_then(|v| v.as_bool())).unwrap_or(false) => Some(tr(l)),
+                    Row::Text(_, "server", _) => Some(Self::value(r).split("//").last().unwrap_or("").into()),
+                    _ => None,
+                }).collect();
+                parts.join(" · ")
+            }
+            Row::Pick(_, k, opts) => {
+                let v = cfg.get(*k).and_then(|v| v.as_str()).unwrap_or(opts[0].0);
+                String::from(opts.iter().find(|o| o.0 == v).unwrap_or(&opts[0]).1)
+            }
+            Row::Text2(_, k, secret) => {
+                let v = cfg.get(*k).and_then(|v| v.as_str()).unwrap_or("");
+                if v.is_empty() { tr("same_server") } else if *secret { "•".repeat(v.chars().count().min(8)) } else { String::from(v) }
+            }
+            Row::Section(_) | Row::Action(_) => String::new(),
+        }
+    }
+    fn draw(&mut self) {
+        let (w, _) = screen();
+        dsn::clear();
+        header(self.title);
+        self.row_ys.clear();
+        let (left, right) = (SIDE_PAD + ROW_INSET, w - SIDE_PAD - ROW_INSET);
+        let mut y = content_top() + 4;
+        for (i, row) in self.rows.iter().enumerate() {
+            match row {
+                Row::Section(t) => {
+                    if !t.is_empty() {
+                        let lines = gfx::wrap(SMALL, &tr(t), right - left);
+                        for l in &lines {
+                            let lx = if crate::i18n::rtl() { right - gfx::text_width(SMALL, l) } else { left };
+                            gfx::text(lx, y + 10, SMALL, l, dsn::BLACK);
+                            y += SMALL.line_h;
+                        }
+                        y += 16;
+                    }
+                }
+                Row::Page(label, ..) | Row::Choice(label, ..) | Row::Toggle(label, _) | Row::Text(label, ..) | Row::List(label, _)
+                | Row::Pick(label, ..) | Row::Text2(label, ..) | Row::Action(label) => {
+                    self.row_ys.push((i, y));
+                    let page = matches!(row, Row::Page(..));
+                    let rh = ROW_PITCH + if page { SMALL.line_h + 4 } else { 0 };
+                    if i == self.selected {
+                        dsn::fill_round(left - 8, y + 4, right - left + 16, rh - 8, dsn::LIGHT_GRAY, 6);
+                    }
+                    let ty = y + (ROW_PITCH - UI12.line_h) / 2 - if page { 2 } else { 0 };
+                    let label = &tr(label);
+                    let lw = gfx::text_width(UI12, label);
+                    let rtl = crate::i18n::rtl();
+                    gfx::text(if rtl { right - lw } else { left }, ty, UI12, label, dsn::BLACK);
+                    if matches!(row, Row::Page(..)) {
+                        // A page row: its summary below the label, and a chevron.
+                        gfx::text(if rtl { left } else { right - 12 }, y + (rh - UI12.line_h) / 2, UI12, if rtl { "‹" } else { "›" }, dsn::BLACK);
+                        let sub = gfx::truncated(SMALL, &Self::value(row), right - left - 24);
+                        let sw = gfx::text_width(SMALL, &sub);
+                        gfx::text(if rtl { right - sw } else { left }, ty + UI12.line_h, SMALL, &sub, dsn::BLACK);
+                        y += rh;
+                        continue;
+                    }
+                    let value = gfx::truncated(UI12, &Self::value(row), right - left - lw - 24);
+                    let vw = gfx::text_width(UI12, &value);
+                    gfx::text(if rtl { left } else { right - vw }, ty, UI12, &value, dsn::BLACK);
+                    y += ROW_PITCH;
+                }
+            }
+        }
+        hints(["back", if matches!(self.rows[self.selected], Row::Page(..)) { "open" } else { "change" }, "up", "down"]);
+        dsn::refresh();
+    }
+    fn change(&self, i: usize) {
+        match &self.rows[i] {
+            Row::Page(_, title, rows) => SettingsScreen::page(title, rows).run(),
+            Row::Choice(_, k, choices) => {
+                let cur = store::read_json("config.json").and_then(|c| c.get(*k).and_then(|v| v.as_u64()))
+                    .unwrap_or_else(|| CHOICE_DEFAULTS.iter().find(|c| c.0 == *k).map(|c| c.1).unwrap_or(0));
+                store::set_config(k, serde_json::Value::from((cur + 1) % choices.len() as u64));
+            }
+            Row::Toggle(_, k) => {
+                let on = store::read_json("config.json").and_then(|c| c.get(*k).and_then(|v| v.as_bool())).unwrap_or(false);
+                store::set_config(k, serde_json::Value::from(!on));
+            }
+            Row::Action(_) => test_connection(),
+            Row::Pick(_, k, opts) => {
+                let cur = store::read_json("config.json").and_then(|c| c.get(*k).and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_default();
+                let i = opts.iter().position(|o| o.0 == cur).unwrap_or(0);
+                store::set_config(k, serde_json::Value::from(opts[(i + 1) % opts.len()].0));
+            }
+            Row::Text(label, k, secret) | Row::Text2(label, k, secret) => {
+                if let Some(t) = keyboard(&tr(label), *secret) {
+                    store::set_config(k, serde_json::Value::from(t.trim()));
+                }
+            }
+            Row::List(label, k) => {
+                if let Some(t) = keyboard(&trf("comma_separated", &[Arg::S(&tr(label))]), false) {
+                    let names: Vec<serde_json::Value> = t.split(',').map(|n| n.trim()).filter(|n| !n.is_empty())
+                        .map(serde_json::Value::from).collect();
+                    store::set_config(k, serde_json::Value::Array(names));
+                }
+            }
+            Row::Section(_) => {}
+        }
+    }
+    fn run(&mut self) {
+        let rows: Vec<usize> = self.rows.iter().enumerate().filter(|(_, r)| !matches!(r, Row::Section(_))).map(|(i, _)| i).collect();
+        self.draw();
+        loop {
+            let e = dsn::wait_event();
+            let at = rows.iter().position(|&r| r == self.selected).unwrap_or(0);
+            match dsn::ev_type(e) {
+                dsn::EV_BACK => return,
+                dsn::EV_NEXT | dsn::EV_SWIPE_UP => self.selected = rows[(at + 1) % rows.len()],
+                dsn::EV_PREV | dsn::EV_SWIPE_DOWN => self.selected = rows[(at + rows.len() - 1) % rows.len()],
+                dsn::EV_CONFIRM => self.change(self.selected),
+                dsn::EV_TAP => {
+                    let y = dsn::ev_y(e);
+                    let Some(&(i, _)) = self.row_ys.iter().rev().find(|(_, ry)| y >= *ry) else { continue };
+                    self.selected = i;
+                    self.change(i);
+                }
+                _ => continue,
+            }
+            self.draw();
+        }
+    }
+}
+/// The firmware's on-screen keyboard; None when cancelled.
+fn keyboard(prompt: &str, secret: bool) -> Option<String> {
+    let mut buf = alloc::vec![0u8; 512];
+    let n = dsn::dsn_text_input(prompt.as_bytes(), &mut buf, if secret { 1 } else { 0 });
+    if n < 0 {
+        return None;
+    }
+    let n = (n as usize).min(buf.len());
+    let end = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
+    core::str::from_utf8(&buf[..end]).ok().map(String::from)
 }
 
 // ---------------------------------------------------------------- the app
@@ -597,13 +910,17 @@ pub fn run() {
         INSET_TOP = dev.inset_top as i32;
     }
     store::today();
+    store::sync_vacation();
     let mut list = DeckList::load();
     list.draw();
     loop {
         let e = dsn::wait_event();
         let rows = list.rows();
         let activate = |list: &mut DeckList, i: i32| {
-            if list.sync_row && i == list.decks.len() as i32 {
+            if i == list.settings_row() {
+                SettingsScreen::new().run();
+                store::sync_vacation();
+            } else if list.sync_row && i == list.decks.len() as i32 {
                 run_sync();
             } else if i >= 0 && (i as usize) < list.decks.len() {
                 let d = &list.decks[i as usize];
@@ -617,7 +934,7 @@ pub fn run() {
             }
             let keep = list.selected;
             *list = DeckList::load();
-            list.selected = keep.min(list.rows() - 1).max(0);
+            list.selected = keep.min(list.rows() - 1).max(-1);
             true
         };
         let slots = list.bar.count();
@@ -634,9 +951,10 @@ pub fn run() {
             }
             dsn::EV_BACK => return,
             // Down past the last row moves into the tab bar, on this screen's tab.
-            dsn::EV_NEXT if rows == 0 || list.selected == rows - 1 => list.band = Some(list.bar.slot_of_current()),
-            dsn::EV_NEXT | dsn::EV_SWIPE_UP if rows > 0 => list.selected = (list.selected + 1) % rows,
-            dsn::EV_PREV | dsn::EV_SWIPE_DOWN if rows > 0 => list.selected = (list.selected + rows - 1) % rows,
+            dsn::EV_NEXT if list.selected == rows - 1 => list.band = Some(list.bar.slot_of_current()),
+            dsn::EV_NEXT | dsn::EV_SWIPE_UP => list.selected = (list.selected + 1).min(rows - 1),
+            // Up from the first row reaches the settings icon beside the title.
+            dsn::EV_PREV | dsn::EV_SWIPE_DOWN => list.selected = (list.selected - 1).max(-1),
             dsn::EV_CONFIRM => {
                 let i = list.selected;
                 if !activate(&mut list, i) {
@@ -649,7 +967,9 @@ pub fn run() {
                     list.bar.activate(slot);
                     continue;
                 }
-                let hit = list.row_ys.iter().find(|(_, ry)| y >= *ry && y < ry + ROW_PITCH).map(|r| r.0);
+                let icon = DeckList::settings_icon_rect();
+                let on_icon = x >= icon.x - 12 && x < icon.x + icon.w + 12 && y >= icon.y - 12 && y < icon.y + icon.h + 12;
+                let hit = if on_icon { Some(-1) } else { list.row_ys.iter().find(|(_, ry)| y >= *ry && y < ry + ROW_PITCH).map(|r| r.0) };
                 let Some(i) = hit else { continue };
                 list.selected = i;
                 if !activate(&mut list, i) {

@@ -11,7 +11,7 @@ pub struct Converted {
 const BLOCK: [&str; 21] = ["div", "p", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "table", "blockquote",
                            "section", "center", "article", "header", "footer", "dl", "dd"];
 
-fn entity(name: &str) -> Option<char> {
+pub fn entity(name: &str) -> Option<char> {
     Some(match name {
         "nbsp" => ' ',
         "amp" => '&',
@@ -36,7 +36,7 @@ fn entity(name: &str) -> Option<char> {
     })
 }
 
-fn attr(tag: &str, name: &str) -> Option<String> {
+pub fn attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0;
     while let Some(i) = lower[from..].find(name) {

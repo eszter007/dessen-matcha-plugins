@@ -7,8 +7,16 @@
 | Plugin | What it does |
 |---|---|
 | [Insights](plugins/insights) | matcha's Insights screen: streak, this week, books finished, days read, total time, longest streak, sessions, average session, month calendar, language tabs, and a page per book |
-| [Flashcards](plugins/flashcards) | matcha's Flashcards, in Rust: Anki and Migaku decks synced through [matcha-anki-server](https://github.com/eszter007/matcha-anki-server), reviewed with FSRS-5 and Anki's learning steps, burying, Easy Days and leeches; reviews and schedules go back with each sync. Proof of concept: cards are plain text and 1-bit pictures |
+| [Flashcards](plugins/flashcards) | matcha's Flashcards, in Rust: Anki and Migaku decks synced through [matcha-anki-server](https://github.com/eszter007/matcha-anki-server), reviewed with FSRS-5 and Anki's learning steps, burying, Easy Days and leeches. Anki cards keep their CSS; words mined in matcha show on its spine card and can be reviewed before they reach Anki, then handed over. 37 languages. [User guide](plugins/flashcards/docs/GUIDE.md) |
 | [Ticket](plugins/ticket) | matcha's end-of-book ticket: when you leave a book you read to the end, the cover and title on a torn ticket with a 読了 stamp and the start and finish dates, reading time and days on the stub, Home and Continue with the next book |
+
+<p>
+<img src="plugins/flashcards/docs/img/deck-list.png" width="160" alt="Flashcards: deck list">
+<img src="plugins/flashcards/docs/img/spine-ja-front.png" width="160" alt="Flashcards: spine card">
+<img src="plugins/flashcards/docs/img/spine-de-back.png" width="160" alt="Flashcards: spine card, back">
+<img src="plugins/flashcards/docs/img/anki-kaishi-back.png" width="160" alt="Flashcards: Anki card with furigana">
+<img src="plugins/flashcards/docs/img/anki-grammar-back.png" width="160" alt="Flashcards: Anki card with a table">
+</p>
 
 ## Requirements
 
@@ -51,6 +59,19 @@ python3 tools/matcha_fonts.py ../matcha-reader plugins/ticket/fonts \
 # matcha's stamps, pre-turned (the costliest part of a ticket to do on the device):
 python3 tools/make_stamps.py ../matcha-reader plugins/ticket
 ```
+
+The Flashcards plugin's data is generated the same way (sources: a matcha-reader checkout and
+the Noto CJK fonts from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk)):
+
+- `fonts/`: `tools/matcha_fonts.py` — card text faces `cs*`/`cn*` (Noto Serif/Sans, 12–40 pt,
+  `text` set), CJK faces `k14*`, `k20*` (Noto Sans CJK SC/JP/TC/KR, `cjkall`/`kr` sets, which
+  include the JIS and KS character sets), spine faces `sp`, `spk*`, `spmj` (Noto Serif Bold,
+  Noto Serif CJK Bold), Arabic `ar*` and Hebrew `he*` (Noto Sans Arabic/Hebrew); `tc.bin` marks
+  the ideographs only Traditional Chinese uses.
+- `hyph/`: `python3 tools/matcha_hyph.py ../matcha-reader-migaku plugins/flashcards` (matcha's
+  Liang patterns).
+- `i18n/`: one JSON file per language code CrossPoint stores (`/.crosspoint/settings.json`);
+  `EN.json` is the source.
 
 ## Notes for Dessen apps
 
