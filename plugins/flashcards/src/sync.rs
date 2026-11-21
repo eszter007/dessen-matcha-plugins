@@ -55,6 +55,7 @@ pub fn services() -> Result<Vec<Service>, &'static str> {
 #[derive(Default)]
 pub struct Totals {
     pub remote_skipped: bool, // AnkiWeb was not synced this time
+    pub sent: bool,           // something went to Anki: the closing AnkiWeb sync is worth it
     pub added: u32,
     pub pulled: u32,
     pub pushed: u32,
@@ -101,6 +102,7 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
         let handed = crate::handover::hand_over(&mut client, svc.migaku, &mut totals.added)
             .map_err(|e| (String::from(svc.name), e))?;
         let cfg_key = if svc.migaku { "migaku" } else { "anki" };
+        totals.sent |= !handed.is_empty();
         for d in handed {
             if !wanted_decks.contains(&d) {
                 wanted_decks.push(d);
@@ -124,7 +126,10 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
         sync_deck(&mut client, svc, wanted, &key, &server_id, &preset, progress, totals).map_err(|e| (wanted.clone(), e))?;
         keys.push(key);
     }
-    remote(&mut client, false, &mut totals.remote_skipped).map_err(|e| (String::from(svc.name), e))?;
+    // Nothing sent: AnkiWeb already has all of it from the first sync.
+    if totals.sent {
+        remote(&mut client, false, &mut totals.remote_skipped).map_err(|e| (String::from(svc.name), e))?;
+    }
     Ok(())
 }
 
@@ -171,6 +176,48 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
     }
     let known = store::read_ids(key);
     let mut sides = store::read_sides(key);
+    // Notes edited in Anki since the last sync: their cards are fetched again (Anki's own
+    // "edited:n" search, n days back, a day more for safety).
+    let today = store::today();
+    if info.last_sync > 0 && today >= info.last_sync {
+        let days = (today - info.last_sync) as u32 + 1;
+        let q = format!("{} edited:{}", query, days);
+        let mut cursor = Value::Null;
+        let mut edited: Vec<u64> = Vec::new();
+        loop {
+            let mut params = json!({"query": q, "limit": 200});
+            if !cursor.is_null() {
+                params["cursor"] = cursor.clone();
+            }
+            let page = client.call("cards.search", params)?;
+            edited.extend(page.get("ids").and_then(|v| v.as_array()).into_iter().flatten().map(id_str));
+            cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+            if cursor.is_null() {
+                break;
+            }
+        }
+        // "edited:n" counts whole days, and new notes too: the notes' own time decides.
+        let note_of = |c: u64| known.iter().find(|r| r.id == c).map(|r| r.note);
+        let mut note_ids: Vec<u64> = edited.iter().filter_map(|c| note_of(*c)).collect();
+        note_ids.sort_unstable();
+        note_ids.dedup();
+        let since = info.last_sync_at - 120; // the device's clock may be a little behind the server's
+        let mut changed: Vec<u64> = Vec::new();
+        for chunk in note_ids.chunks(50) {
+            let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
+            let got = client.call("notes.getMany", json!({"ids": list}))?;
+            for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+                let Some(n) = item.get("result") else { continue };
+                let modified = n["modifiedAt"].as_str().and_then(store::iso_seconds).unwrap_or(i64::MAX);
+                if info.last_sync_at == 0 || modified > since {
+                    changed.extend(n["cardIds"].as_array().into_iter().flatten().map(id_str));
+                }
+            }
+        }
+        if !changed.is_empty() {
+            sides.retain(|s| !changed.contains(&s.0));
+        }
+    }
     let mut records: Vec<CardRecord> = Vec::with_capacity(ids.len());
     let missing: Vec<u64> = ids.iter().copied().filter(|id| !sides.iter().any(|s| s.0 == *id)).collect();
     // Notes for the cards not seen before (burying needs them).
@@ -206,41 +253,75 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
         }
     }
     // Each new card's two sides, as plain text, and its pictures as 1-bit images.
-    for (n, id) in missing.iter().enumerate() {
-        if n % 5 == 0 {
-            progress.show(&title, &format!("{} / {}", n, missing.len()));
-        }
+    // Mined words keep their fields; the other new cards come rendered, 50 to a request (the
+    // server's device.renderMany; one by one from a server without it).
+    let mut to_render: Vec<u64> = Vec::new();
+    for id in &missing {
         let note = notes.iter().find(|x| x.0 == *id).map(|x| x.1);
         if let Some(m) = note.and_then(|nid| mined.iter().find(|m| m.0 == nid)) {
             sides.push((*id, m.1.clone(), String::new()));
             totals.added += 1;
-            continue;
+        } else {
+            to_render.push(*id);
         }
-        let r = client.call("cards.render", json!({"id": format!("{}", id)}))?;
-        let qh = r.get("questionHtml").and_then(|v| v.as_str()).unwrap_or("");
-        let ah = r.get("answerHtml").and_then(|v| v.as_str()).unwrap_or("");
-        let q = html::to_side(qh);
-        let a = html::to_side(ah);
-        for img in q.images.iter().chain(a.images.iter()) {
-            fetch_image(client, img);
+    }
+    let mut batch_ok = true;
+    let mut done = 0;
+    for chunk in to_render.chunks(50) {
+        progress.show(&title, &format!("{} / {}", done, to_render.len()));
+        let rendered: Vec<(u64, Value)> = if batch_ok {
+            let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
+            match client.call("device.renderMany", json!({"ids": list})) {
+                Ok(r) => r.get("items").and_then(|v| v.as_array()).into_iter().flatten()
+                    .filter_map(|it| Some((chunk[it["index"].as_u64()? as usize], it.get("result")?.clone()))).collect(),
+                Err(e) if e.kind == Kind::Rpc && e.kind_name == "methodNotFound" => {
+                    batch_ok = false;
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            Vec::new()
+        };
+        let rendered = if batch_ok {
+            rendered
+        } else {
+            let mut v = Vec::new();
+            for id in chunk {
+                v.push((*id, client.call("cards.render", json!({"id": format!("{}", id)}))?));
+            }
+            v
+        };
+        for (id, r) in rendered {
+            let qh = r.get("questionHtml").and_then(|v| v.as_str()).unwrap_or("");
+            let ah = r.get("answerHtml").and_then(|v| v.as_str()).unwrap_or("");
+            for img in html::to_side(qh).images.iter().chain(html::to_side(ah).images.iter()) {
+                fetch_image(client, img);
+            }
+            // The sides as HTML with their note type's CSS (kept once per style), laid out as Anki
+            // styles them (cardhtml.rs).
+            let css = r.get("css").and_then(|v| v.as_str()).unwrap_or("");
+            let css_file = format!("css-{}", &image_file(css)[4..12]);
+            if store::read_file(&format!("{}.css", css_file)).is_none() {
+                store::write_file(&format!("{}.css", css_file), css.as_bytes());
+            }
+            let styled = |h: &str| format!("{}{}\u{1f}{}", store::HTML_MARK, css_file, h);
+            sides.push((id, styled(qh), styled(ah)));
+            totals.added += 1;
         }
-        // The sides as HTML with their note type's CSS (kept once per style), laid out as Anki
-        // styles them (cardhtml.rs).
-        let css = r.get("css").and_then(|v| v.as_str()).unwrap_or("");
-        let css_file = format!("css-{}", &image_file(css)[4..12]);
-        if store::read_file(&format!("{}.css", css_file)).is_none() {
-            store::write_file(&format!("{}.css", css_file), css.as_bytes());
-        }
-        let styled = |h: &str| format!("{}{}\u{1f}{}", store::HTML_MARK, css_file, h);
-        sides.push((*id, styled(qh), styled(ah)));
-        totals.added += 1;
+        done += chunk.len();
     }
     for id in &ids {
         let note = notes.iter().find(|n| n.0 == *id).map(|n| n.1).unwrap_or(0);
         records.push(CardRecord { id: *id, note, flags: 0 });
     }
     sides.retain(|s| ids.contains(&s.0));
-    info.lang = deck_language(name, &sides);
+    // Guessed again only when the deck's cards changed.
+    if info.lang.is_empty() || !missing.is_empty() {
+        info.lang = deck_language(name, &sides);
+    }
+    info.last_sync = today;
+    info.last_sync_at = store::now();
     if !store::write_sides(key, &sides) || !store::write_ids(key, &records) {
         return Err(Error { kind: Kind::Reply, kind_name: String::new(), message: tr("sd_failed") });
     }
@@ -248,9 +329,13 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
     // Pull before push: Anki's reviews land first, then the device's own go out on top.
     pull_reviews(client, &mut info, totals)?;
     seed_studied(client, &info.key, &studied)?;
+    let sending = !store::read_log(key).is_empty();
     push_reviews(client, &mut info, &ids, totals)?;
-    if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": server_id}})) {
-        info.last_review_id = info.last_review_id.max(id_str(&latest["id"]));
+    // The newest review id after the device's own went in (or for a deck never pulled from).
+    if sending || info.last_review_id == 0 {
+        if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": server_id}})) {
+            info.last_review_id = info.last_review_id.max(id_str(&latest["id"]));
+        }
     }
     info.write();
     if !leeches.is_empty() {
@@ -271,6 +356,21 @@ fn fetch_image(client: &mut Client, name: &str) {
     let file = image_file(name);
     if store::read_file(&file).is_some() {
         return;
+    }
+    // Ready for the panel from the server (device.picture: any format, scaled and dithered there);
+    // a server without it sends the PNG, decoded here.
+    if let Ok(p) = client.call("device.picture", json!({"filename": name, "maxWidth": 380, "maxHeight": 320})) {
+        let (w, h) = (p["width"].as_u64().unwrap_or(0) as u16, p["height"].as_u64().unwrap_or(0) as u16);
+        if let Some(bits) = p.get("bits").and_then(|b| b.as_str()).and_then(base64) {
+            if w > 0 && h > 0 && bits.len() == (w as usize).div_ceil(8) * h as usize {
+                let mut out = Vec::with_capacity(4 + bits.len());
+                out.extend_from_slice(&w.to_le_bytes());
+                out.extend_from_slice(&h.to_le_bytes());
+                out.extend_from_slice(&bits);
+                store::write_file(&file, &out);
+                return;
+            }
+        }
     }
     // Only PNG is decoded here: anything else is asked for as "<file>.png", which
     // matcha-anki-server sends converted (as it does WebP for the firmware).
@@ -304,6 +404,7 @@ fn base64(s: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
 
 /// A deck's language, for hyphenating cards too short to tell: from the name of a deck of mined
 /// words (Matcha::Deutsch), else from the text of up to 80 of its cards.
@@ -417,6 +518,14 @@ fn pull_reviews(client: &mut Client, info: &mut DeckInfo, totals: &mut Totals) -
     // Ratings made here and not yet sent: an Anki review of the same card from before one of them
     // is already outdated on this device.
     let unsent = store::read_log(&info.key);
+    // Nothing newer in Anki than the last review already pulled: no list to ask for.
+    if info.last_review_id != 0 {
+        if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": info.server_id}})) {
+            if id_str(&latest["id"]) <= info.last_review_id {
+                return Ok(());
+            }
+        }
+    }
     let mut cursor = Value::Null;
     loop {
         let mut params = json!({"deck": {"id": info.server_id}, "includeManual": false, "limit": 200});
@@ -459,6 +568,7 @@ fn push_reviews(client: &mut Client, info: &mut DeckInfo, in_anki: &[u64], total
     if log.is_empty() {
         return Ok(());
     }
+    totals.sent = true;
     // A review's id is its time in ms: kept unique within the log, so a retry is a duplicate in Anki.
     log.sort_by_key(|e| e.time_ms);
     for i in 1..log.len() {
@@ -512,28 +622,45 @@ fn push_reviews(client: &mut Client, info: &mut DeckInfo, in_anki: &[u64], total
     let mut ids: Vec<u64> = log.iter().map(|e| e.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    let mut fsrs_refused = false;
+    // Due dates grouped by day (one setDueDate per day), then every interval and FSRS memory in
+    // one device.cardsUpdateMany (card by card from a server without it).
+    let mut by_days: Vec<(u16, Vec<String>)> = Vec::new();
+    let mut updates: Vec<Value> = Vec::new();
     for id in ids.iter().filter(|id| !gone.contains(id)) {
         let Ok(i) = states.binary_search_by_key(id, |s| s.id) else { continue };
         let s = states[i];
         let days = s.due.saturating_sub(today);
-        client.call("scheduling.setDueDate", json!({"cardIds": [format!("{}", id)], "days": format!("{}", days)}))?;
+        match by_days.iter_mut().find(|d| d.0 == days) {
+            Some(d) => d.1.push(format!("{}", id)),
+            None => by_days.push((days, alloc::vec![format!("{}", id)])),
+        }
         let interval = if s.due > s.last_review { s.due - s.last_review } else { 1 };
-        if let Err(e) = client.call("advanced.cards.update", json!({"cardId": format!("{}", id), "patch": {"intervalDays": interval}})) {
-            if e.kind != Kind::Rpc {
-                return Err(e);
+        updates.push(json!({"cardId": format!("{}", id), "patch": {"intervalDays": interval}}));
+        updates.push(json!({"cardId": format!("{}", id), "patch": {"fsrsMemory": {
+            "difficulty": s.difficulty.clamp(1.0, 10.0), "stabilityDays": s.stability}}}));
+    }
+    for (days, cards) in by_days {
+        client.call("scheduling.setDueDate", json!({"cardIds": cards, "days": format!("{}", days)}))?;
+    }
+    if !updates.is_empty() {
+        // An SM-2 collection refuses FSRS memory: that item's error is left alone.
+        match client.call("device.cardsUpdateMany", json!({"items": updates})) {
+            Ok(_) => {}
+            Err(e) if e.kind == Kind::Rpc && e.kind_name == "methodNotFound" => {
+                let mut fsrs_refused = false;
+                for u in &updates {
+                    if fsrs_refused && u.pointer("/patch/fsrsMemory").is_some() {
+                        continue;
+                    }
+                    if let Err(e) = client.call("advanced.cards.update", u.clone()) {
+                        if e.kind != Kind::Rpc {
+                            return Err(e);
+                        }
+                        fsrs_refused |= e.kind_name == "unsupportedCapability";
+                    }
+                }
             }
-        }
-        if fsrs_refused {
-            continue;
-        }
-        let memory = json!({"cardId": format!("{}", id), "patch": {"fsrsMemory": {
-            "difficulty": s.difficulty.clamp(1.0, 10.0), "stabilityDays": s.stability}}});
-        if let Err(e) = client.call("advanced.cards.update", memory) {
-            if e.kind != Kind::Rpc {
-                return Err(e);
-            }
-            fsrs_refused = e.kind_name == "unsupportedCapability";
+            Err(e) => return Err(e),
         }
     }
     totals.pushed += log.iter().filter(|e| e.rating > 0 && !gone.contains(&e.id)).count() as u32;

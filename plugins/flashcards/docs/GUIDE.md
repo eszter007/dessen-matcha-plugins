@@ -237,6 +237,12 @@ Each sync, per service (Anki, then Migaku):
    sync, then the device's reviews and the resulting schedules go to Anki.
 4. The server syncs with AnkiWeb again.
 
+Only what changed is fetched: new cards, and cards whose note was edited in Anki since the last
+sync. A deck with nothing new costs a few small requests. With matcha-anki-server's `dessen`
+branch the sync is much quicker: cards come 50 to a request, pictures arrive scaled and dithered
+for the panel (no decoding on the device), and the schedules of all reviewed cards go back in
+one request; an older server still works, card by card.
+
 Cards that arrive already studied in Anki (a deck synced for the first time, or a mined word
 already in Anki) start with their Anki progress: their review history is replayed and Anki's
 FSRS memory taken over. A card with no history to replay (rescheduled by hand) takes Anki's

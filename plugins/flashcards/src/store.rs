@@ -25,7 +25,9 @@ pub fn path(name: &str) -> String { format!("{}/{}", unsafe { &*core::ptr::addr_
 pub fn read(path: &str) -> Option<Vec<u8>> {
     let mut cap = 64 * 1024;
     loop {
-        let mut buf = vec![0u8; cap];
+        // Not zeroed first: the firmware writes what it read, and only that much is kept. Zeroing
+        // was half of a sync's instructions.
+        let mut buf = uninit(cap);
         let n = dsn::fs_read(path, &mut buf);
         if n == dsn::ERR_TOO_BIG && cap < 8 << 20 {
             cap *= 4;
@@ -35,8 +37,17 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
             return None;
         }
         buf.truncate(n as usize);
+        buf.shrink_to_fit();
         return Some(buf);
     }
+}
+/// A byte buffer of `len` whose contents are whatever the allocator left there, for the firmware
+/// to fill (file reads, network replies).
+pub fn uninit(len: usize) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::with_capacity(len);
+    // SAFETY: u8 has no invalid bit patterns; callers only read the bytes the firmware wrote.
+    unsafe { v.set_len(len) };
+    v
 }
 pub fn write(path: &str, data: &[u8]) -> bool { dsn::fs_write(path, data) == 0 }
 pub fn read_file(name: &str) -> Option<Vec<u8>> { read(&path(name)) }
@@ -50,6 +61,12 @@ const EPOCH_2020: i64 = 18262; // 2020-01-01 as days since 1970
 static mut TZ: i64 = 0;
 static mut LAST_DAY: i32 = -1;
 
+/// An ISO time ("2026-11-21T09:15:44.000Z", as the server stamps) as unix seconds.
+pub fn iso_seconds(t: &str) -> Option<i64> {
+    let n = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
+    let days = days_from_civil(n(0, 4)? as i32, n(5, 7)? as u32, n(8, 10)? as u32);
+    Some(days * 86400 + n(11, 13)? * 3600 + n(14, 16)? * 60 + n(17, 19)?)
+}
 pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y } as i64;
     let era = y.div_euclid(400);
@@ -101,6 +118,8 @@ pub struct DeckInfo {
     pub new_mix: String,
     pub new_random: bool,
     pub last_review_id: u64,
+    pub last_sync: u16, // the day of the last full sync of this deck (0: never)
+    pub last_sync_at: i64, // and its time, unix seconds (0: unknown)
     pub preset: bool, // its Anki preset was read; else the plugin's settings schedule it
     pub lang: String, // its cards' language, for hyphenation ("de", "en", ...; empty: unknown)
 }
@@ -119,7 +138,7 @@ impl DeckInfo {
             new_per_day: 20, reviews_per_day: 9999, retention: 0.9, max_interval: 36500, learn_steps: vec![10],
             relearn_steps: vec![10], bury_new: false, bury_reviews: false, easy_days: [100; 7], leech_threshold: 0,
             leech_suspend: true, review_order: String::from("day"), new_mix: String::from("mixed"), new_random: false,
-            last_review_id: 0, preset: false, lang: String::new(),
+            last_review_id: 0, preset: false, lang: String::new(), last_sync: 0, last_sync_at: 0,
         }
     }
     pub fn read(key: &str) -> Option<DeckInfo> {
@@ -130,6 +149,8 @@ impl DeckInfo {
         d.last_review_id = text(&v, "lastReviewId").parse().unwrap_or(0);
         d.preset = v.get("preset").and_then(|x| x.as_bool()).unwrap_or(false);
         d.lang = text(&v, "lang");
+        d.last_sync = num(&v, "lastSync", 0.0) as u16;
+        d.last_sync_at = num(&v, "lastSyncAt", 0.0) as i64;
         if !d.preset {
             // As matcha's schedulingParams: the user's settings where no preset was read.
             let st = Settings::read();
@@ -172,7 +193,7 @@ impl DeckInfo {
             "easyDaysPercentages": self.easy_days, "leechThreshold": self.leech_threshold,
             "leechAction": if self.leech_suspend { "suspend" } else { "tagOnly" }, "reviewOrder": self.review_order,
             "newMix": self.new_mix, "newSortOrder": if self.new_random { "randomCard" } else { "template" },
-            "lastReviewId": format!("{}", self.last_review_id), "preset": self.preset, "lang": self.lang,
+            "lastReviewId": format!("{}", self.last_review_id), "preset": self.preset, "lang": self.lang, "lastSync": self.last_sync, "lastSyncAt": self.last_sync_at,
         });
         write_json(&format!("{}.json", self.key), &v)
     }

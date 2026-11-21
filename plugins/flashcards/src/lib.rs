@@ -41,11 +41,38 @@ unsafe impl GlobalAlloc for Alloc {
 }
 #[global_allocator]
 static HEAP: Alloc = Alloc(UnsafeCell::new(Heap::empty()));
-const HEAP_SIZE: usize = 3584 * 1024; // of the 4 MB a PSRAM board gives an app
+const HEAP_SIZE: usize = 3456 * 1024; // of the 4 MB a PSRAM board gives an app
 static mut ARENA: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
+/// A panic ends the app; where and why goes to panic.txt in the plugin folder, for bug reports.
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { dsn::exit(101) }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::fmt::Write;
+    struct Buf([u8; 512], usize);
+    impl Write for Buf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for &b in s.as_bytes() {
+                if self.1 < self.0.len() {
+                    self.0[self.1] = b;
+                    self.1 += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut b = Buf([0; 512], 0);
+    let _ = write!(b, "{}", info);
+    let mut dir = [0u8; 160];
+    let n = dsn::fs_app_dir(&mut dir).max(0) as usize;
+    let mut path = [0u8; 180];
+    let d = &dir[..n.min(160)];
+    path[..d.len()].copy_from_slice(d);
+    path[d.len()..d.len() + 10].copy_from_slice(b"/panic.txt");
+    if let Ok(p) = core::str::from_utf8(&path[..d.len() + 10]) {
+        dsn::fs_write(p, &b.0[..b.1]);
+    }
+    dsn::exit(101)
+}
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {

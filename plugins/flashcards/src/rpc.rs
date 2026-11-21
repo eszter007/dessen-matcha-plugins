@@ -1,7 +1,7 @@
 //! JSON-RPC 2.0 to matcha-anki-server (POST <server>/api/v1, or /migaku/api/v1 for the Migaku
 //! bridge), with the server key as a bearer token, as matcha's AnkiClient.
 use crate::{dsn, store};
-use alloc::{format, string::String, vec};
+use alloc::{format, string::String, vec::Vec};
 use serde_json::{json, Value};
 
 #[derive(Clone, PartialEq)]
@@ -26,20 +26,24 @@ pub struct Client {
     pub url: String,
     pub key: String,
     next_id: u32,
+    reply: Vec<u8>, // one reply buffer for every call of this client
 }
 
 const REPLY_BYTES: usize = 1024 * 1024; // a media.get reply holds a whole image in base64
 
 impl Client {
-    pub fn new(url: &str, key: &str) -> Client { Client { url: String::from(url), key: String::from(key), next_id: 1 } }
+    pub fn new(url: &str, key: &str) -> Client { Client { url: String::from(url), key: String::from(key), next_id: 1, reply: Vec::new() } }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
         let body = json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params});
         self.next_id += 1;
         let body = serde_json::to_vec(&body).unwrap_or_default();
         let head = format!("POST {}\nContent-Type: application/json\nAuthorization: Bearer {}\n", self.url, self.key);
-        let mut resp = vec![0u8; REPLY_BYTES];
-        let n = dsn::net_request(&head, &body, &mut resp);
+        if self.reply.len() < REPLY_BYTES {
+            self.reply = store::uninit(REPLY_BYTES);
+        }
+        let resp = &mut self.reply;
+        let n = dsn::net_request(&head, &body, resp);
         if n < 0 {
             return Err(Error::new(if n == dsn::ERR_TOO_BIG { Kind::Reply } else { Kind::Network }, method));
         }
@@ -51,7 +55,6 @@ impl Client {
             return Err(Error::new(Kind::Http(status), method));
         }
         let reply: Value = serde_json::from_slice(&resp[4..4 + n as usize]).map_err(|_| Error::new(Kind::Reply, method))?;
-        drop(resp);
         if let Some(e) = reply.get("error") {
             return Err(Error {
                 kind: Kind::Rpc,

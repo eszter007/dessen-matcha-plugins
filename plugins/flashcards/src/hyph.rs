@@ -391,12 +391,12 @@ pub fn guess_lang_sure(text: &str) -> Option<&'static str> {
         ("sv", &["och", "är", "en", "ett", "det", "att", "jag", "inte", "på", "med", "som", "för"]),
         ("fi", &["ja", "on", "ei", "se", "että", "hän", "minä", "kun", "mutta", "oli", "ovat"]),
     ];
+    // Each word lower-cased once, then counted against every list.
+    let words: Vec<String> = text.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty() && w.len() <= 12)
+        .map(|w| w.to_lowercase()).collect();
     let mut best = ("", 0);
-    for (lang, words) in WORDS {
-        let n = text.split(|c: char| !c.is_alphabetic()).filter(|w| {
-            let lw = w.to_lowercase();
-            words.contains(&lw.as_str())
-        }).count();
+    for (lang, list) in WORDS {
+        let n = words.iter().filter(|w| list.contains(&w.as_str())).count();
         if n > best.1 {
             best = (lang, n);
         }
