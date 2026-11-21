@@ -7,7 +7,7 @@
 //! "ankiServer" / "migakuServer" (and "ankiKey" / "migakuKey") point a service elsewhere.
 use crate::rpc::{Client, Error, Kind};
 use crate::store::{self, CardRecord, DeckInfo, Pulled};
-use crate::{html, png};
+use crate::png;
 use crate::i18n::{tr, trf, Arg};
 use alloc::{format, string::String, vec::Vec};
 use serde_json::{json, Value};
@@ -113,7 +113,9 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
         }
     }
     let decks = client.call("decks.list", json!({})).map_err(|e| (String::new(), e))?;
-    let list = decks.as_array().cloned().unwrap_or_default();
+    let list = decks.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    // (name, server id, preset, the deck as stored here)
+    let mut chosen: Vec<(String, String, String, DeckInfo)> = Vec::new();
     for wanted in &wanted_decks {
         let found = list.iter().find(|d| d.get("name").and_then(|n| n.as_str()) == Some(wanted.as_str()));
         let Some(d) = found else {
@@ -123,8 +125,18 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
         let server_id = String::from(d.get("id").and_then(|v| v.as_str()).unwrap_or(""));
         let preset = String::from(d.get("presetId").and_then(|v| v.as_str()).unwrap_or(""));
         let key = format!("{}{}", if svc.migaku { "m" } else { "a" }, server_id);
-        sync_deck(&mut client, svc, wanted, &key, &server_id, &preset, progress, totals).map_err(|e| (wanted.clone(), e))?;
-        keys.push(key);
+        let info = DeckInfo::read(&key).unwrap_or_else(|| DeckInfo::new(&key, wanted, svc.migaku, &server_id));
+        chosen.push((wanted.clone(), server_id, preset, info));
+    }
+    drop(decks);
+    // Every deck's preset, newest review and cards in one request, where the server has it.
+    let mut overviews: Vec<Option<Overview>> = overviews(&mut client, &chosen).map_err(|e| (String::from(svc.name), e))?
+        .into_iter().map(Some).collect();
+    for (i, (name, server_id, preset, info)) in chosen.iter().enumerate() {
+        let ov = overviews.get_mut(i).and_then(Option::take).unwrap_or(Overview {
+            total: 0, settings: None, latest: None, cards: Vec::new(), next: Some(0) });
+        sync_deck(&mut client, svc, name, &info.key, server_id, preset, ov, progress, totals).map_err(|e| (name.clone(), e))?;
+        keys.push(info.key.clone());
     }
     // Nothing sent: AnkiWeb already has all of it from the first sync.
     if totals.sent {
@@ -133,20 +145,61 @@ pub fn sync_service(svc: &Service, progress: &mut dyn Progress, totals: &mut Tot
     Ok(())
 }
 
+/// One deck as matcha-anki-server's device.decks gives it: its preset's settings, its newest
+/// review, and its cards in Anki's order with their notes and whether the note was edited.
+pub struct Overview {
+    total: usize,
+    settings: Option<Value>,
+    latest: Option<u64>,
+    cards: Vec<(u64, u64, bool)>,
+    next: Option<u64>,
+}
+fn parse_overview(d: &Value) -> Overview {
+    let mut cards = Vec::new();
+    for t in d.get("cards").and_then(|c| c.as_str()).unwrap_or("").split_ascii_whitespace() {
+        let mut p = t.split('.').map(|x| x.parse::<u64>().unwrap_or(0));
+        if let (Some(c), Some(n), Some(e)) = (p.next(), p.next(), p.next()) {
+            cards.push((c, n, e == 1));
+        }
+    }
+    Overview {
+        total: d.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        settings: d.get("settings").filter(|s| !s.is_null()).cloned(),
+        latest: d.get("latestReviewId").filter(|v| !v.is_null()).map(id_str),
+        cards,
+        next: d.get("nextOffset").and_then(|v| v.as_u64()),
+    }
+}
+/// The deck reference device.decks takes; `since` makes it mark notes edited after the last sync.
+fn deck_ref(info: &DeckInfo, name: &str, preset: &str, offset: u64) -> Value {
+    json!({"id": info.server_id, "name": name, "presetId": preset,
+           "since": if info.last_sync > 0 { info.last_sync_at } else { 0 }, "offset": offset})
+}
+const OVERVIEW_LIMIT: u32 = 2000;
+/// Every chosen deck in one request (more only for decks past the card limit).
+fn overviews(client: &mut Client, decks: &[(String, String, String, DeckInfo)]) -> Result<Vec<Overview>, Error> {
+    let refs: Vec<Value> = decks.iter().map(|(name, _, preset, info)| deck_ref(info, name, preset, 0)).collect();
+    let r = client.call("device.decks", json!({"decks": refs, "limit": OVERVIEW_LIMIT}))?;
+    Ok(r.get("decks").and_then(|d| d.as_array()).into_iter().flatten().map(parse_overview).collect())
+}
+
+/// What device.pack asks for at once, and how much a reply may carry.
+const PACK_IDS: usize = 1000;
+const PACK_BYTES: usize = 192 * 1024;
+/// Index written after this many new cards (and at the end): a sync cut off loses little.
+const INDEX_EVERY: usize = 2000;
+
 #[allow(clippy::too_many_arguments)]
 fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_id: &str, preset: &str,
-             progress: &mut dyn Progress, totals: &mut Totals) -> Result<(), Error> {
+             mut ov: Overview, progress: &mut dyn Progress, totals: &mut Totals) -> Result<(), Error> {
+    let _ = preset;
     let mut info = DeckInfo::read(key).unwrap_or_else(|| DeckInfo::new(key, name, svc.migaku, server_id));
     info.name = String::from(name);
     let title = trf("syncing", &[Arg::S(name)]);
     progress.show(&title, "");
-    if !preset.is_empty() {
-        if let Ok(p) = client.call("deckPresets.get", json!({"preset": {"id": preset}})) {
-            if let Some(s) = p.get("settings") {
-                info.apply_preset(s);
-                info.preset = true;
-            }
-        }
+    if let Some(s) = &ov.settings {
+        info.apply_preset(s);
+        info.preset = true;
     }
     // Leeches noted on the device: tagged, and suspended as the preset says, in Anki.
     let leeches = store::read_leech_records(key);
@@ -158,183 +211,152 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
             client.call("cards.setSuspended", json!({"ids": ids, "suspended": true}))?;
         }
     }
-    // The deck's cards, in Anki's order; suspended cards leave the device.
-    let query = format!("\"deck:{}\" -is:suspended", name.replace('"', "\\\""));
-    let mut ids: Vec<u64> = Vec::new();
-    let mut cursor = Value::Null;
-    loop {
-        let mut params = json!({"query": query, "limit": 200});
-        if !cursor.is_null() {
-            params["cursor"] = cursor.clone();
-        }
-        let page = client.call("cards.search", params)?;
-        ids.extend(page.get("ids").and_then(|v| v.as_array()).into_iter().flatten().map(id_str));
-        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
-        if cursor.is_null() {
-            break;
-        }
-    }
-    let known = store::read_ids(key);
-    let mut sides = store::read_sides(key);
-    // Notes edited in Anki since the last sync: their cards are fetched again (Anki's own
-    // "edited:n" search, n days back, a day more for safety).
     let today = store::today();
-    if info.last_sync > 0 && today >= info.last_sync {
-        let days = (today - info.last_sync) as u32 + 1;
-        let q = format!("{} edited:{}", query, days);
-        let mut cursor = Value::Null;
-        let mut edited: Vec<u64> = Vec::new();
-        loop {
-            let mut params = json!({"query": q, "limit": 200});
-            if !cursor.is_null() {
-                params["cursor"] = cursor.clone();
-            }
-            let page = client.call("cards.search", params)?;
-            edited.extend(page.get("ids").and_then(|v| v.as_array()).into_iter().flatten().map(id_str));
-            cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
-            if cursor.is_null() {
-                break;
+    let mut sides = store::Sides::open(key);
+    // The deck's cards in Anki's order (suspended cards leave the device), each card's note, and
+    // the cards whose note was edited in Anki since the last sync (fetched again).
+    // (card, note) in Anki's order, sized once from the deck's total.
+    let mut cards: Vec<(u64, u64)> = Vec::with_capacity(ov.total);
+    let mut changed: Vec<u64> = Vec::new();
+    loop {
+        for &(c, n, edited) in &ov.cards {
+            cards.push((c, n));
+            if edited {
+                changed.push(c);
             }
         }
-        // "edited:n" counts whole days, and new notes too: the notes' own time decides.
-        let note_of = |c: u64| known.iter().find(|r| r.id == c).map(|r| r.note);
-        let mut note_ids: Vec<u64> = edited.iter().filter_map(|c| note_of(*c)).collect();
-        note_ids.sort_unstable();
-        note_ids.dedup();
-        let since = info.last_sync_at - 120; // the device's clock may be a little behind the server's
-        let mut changed: Vec<u64> = Vec::new();
-        for chunk in note_ids.chunks(50) {
-            let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
-            let got = client.call("notes.getMany", json!({"ids": list}))?;
-            for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
-                let Some(n) = item.get("result") else { continue };
-                let modified = n["modifiedAt"].as_str().and_then(store::iso_seconds).unwrap_or(i64::MAX);
-                if info.last_sync_at == 0 || modified > since {
-                    changed.extend(n["cardIds"].as_array().into_iter().flatten().map(id_str));
-                }
-            }
-        }
-        if !changed.is_empty() {
-            sides.retain(|s| !changed.contains(&s.0));
-        }
+        let Some(offset) = ov.next else { break };
+        let r = client.call("device.decks", json!({"decks": [deck_ref(&info, name, preset, offset)], "limit": OVERVIEW_LIMIT}))?;
+        let Some(d) = r.get("decks").and_then(|d| d.get(0)) else { break };
+        let latest = ov.latest;
+        ov = parse_overview(d);
+        ov.latest = latest;
     }
-    let mut records: Vec<CardRecord> = Vec::with_capacity(ids.len());
-    let missing: Vec<u64> = ids.iter().copied().filter(|id| !sides.iter().any(|s| s.0 == *id)).collect();
-    // Notes for the cards not seen before (burying needs them).
-    let mut notes: Vec<(u64, u64)> = known.iter().map(|r| (r.id, r.note)).collect();
+    ov.cards = Vec::new();
+    // Cards gone from the deck and edited ones leave; only their chunks are rewritten.
+    let mut in_deck: Vec<u64> = cards.iter().map(|c| c.0).collect();
+    in_deck.sort_unstable();
+    changed.sort_unstable();
+    let sd_failed = || Error { kind: Kind::Reply, kind_name: String::new(), message: tr("sd_failed") };
+    if !sides.retain(|c| in_deck.binary_search(&c).is_ok() && changed.binary_search(&c).is_err()) {
+        return Err(sd_failed());
+    }
+    let missing: Vec<u64> = cards.iter().map(|c| c.0).filter(|id| !sides.has(*id)).collect();
+    sides.reserve(missing.len());
     // Cards new to the device that were already studied in Anki, with Anki's FSRS memory.
     let mut studied: Vec<(u64, Value)> = Vec::new();
-    for chunk in missing.chunks(50) {
-        let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
-        let got = client.call("cards.getMany", json!({"ids": list}))?;
-        for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(r) = item.get("result") {
-                notes.push((id_str(&r["id"]), id_str(&r["noteId"])));
-                let sch = &r["scheduling"];
-                if sch["type"].as_str().is_some_and(|t| t != "new") {
-                    studied.push((id_str(&r["id"]), sch.clone()));
+    // The new cards, packed by the server in the device's own chunk format: each chunk is
+    // written as it arrives; the index only now and then.
+    sides.defer_index();
+    client.keep_buffer = true;
+    let (mut done, mut since_index) = (0, 0);
+    while done < missing.len() {
+        progress.show(&title, &format!("{} / {}", done, missing.len()));
+        let part = &missing[done..(done + PACK_IDS).min(missing.len())];
+        let list: Vec<String> = part.iter().map(|i| format!("{}", i)).collect();
+        let mut header = Value::Null;
+        let mut ok = true;
+        let covered = client.call_raw("device.pack", json!({"ids": list, "maxBytes": PACK_BYTES}), |body| {
+            let mut p = 0;
+            while p + 5 <= body.len() {
+                let kind = body[p];
+                let n = u32::from_le_bytes(body[p + 1..p + 5].try_into().unwrap()) as usize;
+                let Some(data) = body.get(p + 5..p + 5 + n) else { break };
+                p += 5 + n;
+                if kind == 1 {
+                    header = serde_json::from_slice(data).unwrap_or(Value::Null);
+                } else if kind == 2 {
+                    let ids = chunk_ids(data);
+                    ok &= sides.add_chunk(&ids, data);
+                    totals.added += ids.len() as u32;
                 }
             }
-        }
-    }
-    // Words mined in matcha ("Matcha sentence" notes) keep their fields: they are drawn as matcha
-    // draws its own cards, the word on a spine beside the sentence.
-    let mut mined: Vec<(u64, String)> = Vec::new();
-    let new_notes: Vec<u64> = notes.iter().filter(|n| missing.contains(&n.0)).map(|n| n.1).collect();
-    for chunk in new_notes.chunks(20) {
-        let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
-        let got = client.call("notes.getMany", json!({"ids": list}))?;
-        for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(r) = item.get("result") {
-                if r.pointer("/noteType/name").and_then(|v| v.as_str()) == Some(store::MINED_NOTE_TYPE) {
-                    mined.push((id_str(&r["id"]), store::encode_mined(&r["fields"])));
-                }
+        });
+        client.keep_buffer = true;
+        let covered = covered.map(|_| header["done"].as_u64().unwrap_or(0) as usize);
+        let covered = match covered {
+            Ok(c) => c,
+            Err(e) => {
+                client.keep_buffer = false;
+                sides.flush_index();
+                return Err(e);
             }
-        }
-    }
-    // Each new card's two sides, as plain text, and its pictures as 1-bit images.
-    // Mined words keep their fields; the other new cards come rendered, 50 to a request (the
-    // server's device.renderMany; one by one from a server without it).
-    let mut to_render: Vec<u64> = Vec::new();
-    for id in &missing {
-        let note = notes.iter().find(|x| x.0 == *id).map(|x| x.1);
-        if let Some(m) = note.and_then(|nid| mined.iter().find(|m| m.0 == nid)) {
-            sides.push((*id, m.1.clone(), String::new()));
-            totals.added += 1;
-        } else {
-            to_render.push(*id);
-        }
-    }
-    let mut batch_ok = true;
-    let mut done = 0;
-    for chunk in to_render.chunks(50) {
-        progress.show(&title, &format!("{} / {}", done, to_render.len()));
-        let rendered: Vec<(u64, Value)> = if batch_ok {
-            let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
-            match client.call("device.renderMany", json!({"ids": list})) {
-                Ok(r) => r.get("items").and_then(|v| v.as_array()).into_iter().flatten()
-                    .filter_map(|it| Some((chunk[it["index"].as_u64()? as usize], it.get("result")?.clone()))).collect(),
-                Err(e) if e.kind == Kind::Rpc && e.kind_name == "methodNotFound" => {
-                    batch_ok = false;
-                    Vec::new()
-                }
-                Err(e) => return Err(e),
-            }
-        } else {
-            Vec::new()
         };
-        let rendered = if batch_ok {
-            rendered
-        } else {
-            let mut v = Vec::new();
-            for id in chunk {
-                v.push((*id, client.call("cards.render", json!({"id": format!("{}", id)}))?));
-            }
-            v
-        };
-        for (id, r) in rendered {
-            let qh = r.get("questionHtml").and_then(|v| v.as_str()).unwrap_or("");
-            let ah = r.get("answerHtml").and_then(|v| v.as_str()).unwrap_or("");
-            for img in html::to_side(qh).images.iter().chain(html::to_side(ah).images.iter()) {
-                fetch_image(client, img);
-            }
-            // The sides as HTML with their note type's CSS (kept once per style), laid out as Anki
-            // styles them (cardhtml.rs).
-            let css = r.get("css").and_then(|v| v.as_str()).unwrap_or("");
-            let css_file = format!("css-{}", &image_file(css)[4..12]);
-            if store::read_file(&format!("{}.css", css_file)).is_none() {
-                store::write_file(&format!("{}.css", css_file), css.as_bytes());
-            }
-            let styled = |h: &str| format!("{}{}\u{1f}{}", store::HTML_MARK, css_file, h);
-            sides.push((id, styled(qh), styled(ah)));
-            totals.added += 1;
+        if !ok {
+            client.keep_buffer = false;
+            sides.flush_index();
+            return Err(sd_failed());
         }
-        done += chunk.len();
+        for s in header["studied"].as_array().into_iter().flatten() {
+            studied.push((id_str(&s["id"]), s["scheduling"].clone()));
+        }
+        let mined: Vec<(u64, String, String)> = header["fields"].as_array().into_iter().flatten()
+            .map(|f| (id_str(&f["id"]), store::encode_mined(&f["fields"]), String::new())).collect();
+        totals.added += mined.len() as u32;
+        if !sides.add(mined) {
+            return Err(sd_failed());
+        }
+        if let Some(styles) = header["css"].as_object() {
+            for (file, css) in styles {
+                let name = format!("{}.css", file);
+                if store::read_file(&name).is_none() {
+                    store::write_file(&name, css.as_str().unwrap_or("").as_bytes());
+                }
+            }
+        }
+        for img in header["images"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+            fetch_image(client, img);
+        }
+        done += covered.max(1);
+        since_index += covered;
+        if since_index >= INDEX_EVERY {
+            sides.flush_index();
+            sides.defer_index();
+            since_index = 0;
+        }
     }
-    for id in &ids {
-        let note = notes.iter().find(|n| n.0 == *id).map(|n| n.1).unwrap_or(0);
-        records.push(CardRecord { id: *id, note, flags: 0 });
+    client.release();
+    if !sides.flush_index() {
+        return Err(sd_failed());
     }
-    sides.retain(|s| ids.contains(&s.0));
-    // Guessed again only when the deck's cards changed.
-    if info.lang.is_empty() || !missing.is_empty() {
-        info.lang = deck_language(name, &sides);
+    let records: Vec<CardRecord> = cards.iter().map(|&(id, note)| CardRecord { id, note, flags: 0 }).collect();
+    let total = cards.len();
+    drop(cards);
+    // Guessed on the first sync, and again when most of the deck is new.
+    if info.lang.is_empty() || missing.len() * 2 > total {
+        info.lang = deck_language(name, &sides.sample(80));
     }
+    drop(sides);
     info.last_sync = today;
     info.last_sync_at = store::now();
-    if !store::write_sides(key, &sides) || !store::write_ids(key, &records) {
-        return Err(Error { kind: Kind::Reply, kind_name: String::new(), message: tr("sd_failed") });
+    // Rewritten only when the deck's cards or their order changed.
+    let same = {
+        let old = store::read_file(&format!("{}.ids", key)).unwrap_or_default();
+        old.len() == records.len() * 17 && old.chunks_exact(17).zip(&records).all(|(a, b)| {
+            u64::from_le_bytes(a[0..8].try_into().unwrap()) == b.id && u64::from_le_bytes(a[8..16].try_into().unwrap()) == b.note
+        })
+    };
+    if !same && !store::write_ids(key, &records) {
+        return Err(sd_failed());
     }
+    drop(records);
     progress.show(&title, "");
     // Pull before push: Anki's reviews land first, then the device's own go out on top.
-    pull_reviews(client, &mut info, totals)?;
+    let latest = Some(ov.latest);
+    pull_reviews(client, &mut info, totals, latest)?;
+    // Anki's newest review is now in, or was one pulls leave out (made by hand): either way the
+    // next sync needs to ask only for newer ones.
+    if let Some(l) = ov.latest {
+        info.last_review_id = info.last_review_id.max(l);
+    }
     seed_studied(client, &info.key, &studied)?;
     let sending = !store::read_log(key).is_empty();
-    push_reviews(client, &mut info, &ids, totals)?;
-    // The newest review id after the device's own went in (or for a deck never pulled from).
-    if sending || info.last_review_id == 0 {
-        if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": server_id}})) {
-            info.last_review_id = info.last_review_id.max(id_str(&latest["id"]));
+    drop(missing);
+    push_reviews(client, &mut info, &in_deck, totals)?;
+    // The newest review id after the device's own went in.
+    if sending {
+        if let Ok(l) = client.call("reviews.getLatestId", json!({"deck": {"id": server_id}})) {
+            info.last_review_id = info.last_review_id.max(id_str(&l["id"]));
         }
     }
     info.write();
@@ -342,6 +364,22 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
         store::delete_file(&format!("{}.leeches", key));
     }
     Ok(())
+}
+/// The card ids of a packed chunk (decode_sides' format), without decoding its sides.
+fn chunk_ids(b: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    let Some(n) = b.get(0..4).map(|x| u32::from_le_bytes(x.try_into().unwrap()) as usize) else { return out };
+    let mut p = 4;
+    for _ in 0..n {
+        let Some(id) = b.get(p..p + 8).map(|x| u64::from_le_bytes(x.try_into().unwrap())) else { break };
+        out.push(id);
+        p += 8;
+        for _ in 0..2 {
+            let Some(len) = b.get(p..p + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap()) as usize) else { return out };
+            p += 4 + len;
+        }
+    }
+    out
 }
 
 /// image file name -> "img-<fnv>.bit" in the plugin folder.
@@ -438,6 +476,9 @@ fn deck_language(name: &str, sides: &[(u64, String, String)]) -> String {
 /// cut-off hand-over found in Anki) and have no progress here: their own review history is
 /// replayed, as pulled reviews are, and Anki's FSRS memory is taken where it has one.
 fn seed_studied(client: &mut Client, key: &str, studied: &[(u64, Value)]) -> Result<(), Error> {
+    if studied.is_empty() {
+        return Ok(());
+    }
     let (states, _, _) = store::load_states(key);
     let todo: Vec<&(u64, Value)> = studied.iter().filter(|s| states.binary_search_by_key(&s.0, |c| c.id).is_err()).collect();
     if todo.is_empty() {
@@ -514,12 +555,18 @@ fn seed_studied(client: &mut Client, key: &str, studied: &[(u64, Value)]) -> Res
     Ok(())
 }
 
-fn pull_reviews(client: &mut Client, info: &mut DeckInfo, totals: &mut Totals) -> Result<(), Error> {
+/// `latest`: the deck's newest review as device.decks gave it (Some(None): it has none), so no
+/// reviews.getLatestId is needed.
+fn pull_reviews(client: &mut Client, info: &mut DeckInfo, totals: &mut Totals, latest: Option<Option<u64>>) -> Result<(), Error> {
     // Ratings made here and not yet sent: an Anki review of the same card from before one of them
     // is already outdated on this device.
     let unsent = store::read_log(&info.key);
     // Nothing newer in Anki than the last review already pulled: no list to ask for.
-    if info.last_review_id != 0 {
+    if let Some(l) = latest {
+        if l.unwrap_or(0) <= info.last_review_id && (info.last_review_id != 0 || l.is_none()) {
+            return Ok(());
+        }
+    } else if info.last_review_id != 0 {
         if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": info.server_id}})) {
             if id_str(&latest["id"]) <= info.last_review_id {
                 return Ok(());
@@ -563,6 +610,7 @@ fn pull_reviews(client: &mut Client, info: &mut DeckInfo, totals: &mut Totals) -
     }
 }
 
+/// `in_anki`: the deck's cards in Anki, sorted.
 fn push_reviews(client: &mut Client, info: &mut DeckInfo, in_anki: &[u64], totals: &mut Totals) -> Result<(), Error> {
     let mut log = store::read_log(&info.key);
     if log.is_empty() {
@@ -604,7 +652,7 @@ fn push_reviews(client: &mut Client, info: &mut DeckInfo, in_anki: &[u64], total
                     match client.call_operation("advanced.reviews.import", json!({"reviews": [review(entry)]})) {
                         Ok(_) => {}
                         Err(e) if e.kind_name == "conflict" => {}
-                        Err(e) if e.kind_name == "notFound" && !in_anki.contains(&entry.id) => gone.push(entry.id),
+                        Err(e) if e.kind_name == "notFound" && in_anki.binary_search(&entry.id).is_err() => gone.push(entry.id),
                         Err(e) => return Err(e),
                     }
                 }

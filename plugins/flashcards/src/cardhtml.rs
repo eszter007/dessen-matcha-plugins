@@ -800,6 +800,16 @@ struct Builder<'a> {
     lang: &'static str,
     pending_gap: i32,
     bars: Vec<i32>, // x of each left border running beside the current block (a blockquote's bar)
+    paging: Option<Paging>, // the whole side: items paged as they come, only one page kept
+}
+/// Pages a side while it is laid out: every item's height counts, but only the wanted page's
+/// items are kept, so a long side never holds the drawn lines of all its pages at once.
+struct Paging {
+    height: i32,
+    want: usize,
+    page: usize,
+    used: i32,
+    started: bool, // the current page has an item
 }
 impl Builder<'_> {
     fn avail(&self) -> i32 { (self.width - self.left - self.right).max(40) }
@@ -807,13 +817,46 @@ impl Builder<'_> {
     fn push_item(&mut self, it: Item) {
         if self.pending_gap > 0 {
             let band = self.band.then_some((self.left, self.avail()));
-            self.items.push(Item::Gap { h: self.pending_gap, band, bars: self.bars.clone() });
+            let gap = Item::Gap { h: self.pending_gap, band, bars: self.bars.clone() };
             self.pending_gap = 0;
+            self.page_item(gap);
         }
-        self.items.push(it);
+        self.page_item(it);
+    }
+    /// An item onto the current page: on the side's page being laid out, or counted and dropped.
+    fn page_item(&mut self, it: Item) {
+        let Some(p) = self.paging.as_mut() else {
+            self.items.push(it);
+            return;
+        };
+        let h = it.height();
+        if p.used + h > p.height && p.started {
+            if p.page == p.want {
+                while self.items.last().is_some_and(|i| matches!(i, Item::Gap { .. })) {
+                    self.items.pop();
+                }
+            }
+            p.page += 1;
+            p.used = 0;
+            p.started = false;
+        }
+        if p.used == 0 && matches!(it, Item::Gap { .. }) {
+            return;
+        }
+        p.used += h;
+        p.started = true;
+        if p.page == p.want {
+            self.items.push(it);
+        }
     }
     /// Breaks the paragraph into lines and lays them out.
+    /// The wanted page is complete: nothing after it needs laying out.
+    fn past_want(&self) -> bool { self.paging.as_ref().is_some_and(|p| p.page > p.want) }
     fn flush(&mut self) {
+        if self.past_want() {
+            self.runs.clear();
+            return;
+        }
         let runs = core::mem::take(&mut self.runs);
         if runs.iter().all(|r| (r.space || r.text.trim().is_empty()) && r.image.is_none()) {
             return;
@@ -1057,6 +1100,9 @@ impl Builder<'_> {
         }
     }
     fn walk(&mut self, e: &El, parent: Look, ancestors: &mut Vec<*const El>, list: &mut (bool, u32, u32)) {
+        if self.past_want() {
+            return;
+        }
         let mut look = Look { mark: false, pos: Pos::Normal, ..parent };
         let mut bx = BoxLook::default();
         let width = self.avail() as f32 / PX;
@@ -1266,6 +1312,9 @@ impl Builder<'_> {
         }
         ancestors.push(e as *const El);
         for k in &e.kids {
+            if self.past_want() {
+                break;
+            }
             match k {
                 Node::El(c) => self.walk(c, look, ancestors, &mut inner),
                 Node::Text(t) => self.text(t, &look),
@@ -1343,7 +1392,7 @@ impl Builder<'_> {
             let mut height = 0;
             for (c, cell) in r.iter().enumerate().take(cols) {
                 let w = widths[c];
-                let mut sub = Builder { rules: self.rules, items: Vec::new(), runs: Vec::new(), left: 0, right: 0, width: w,
+                let mut sub = Builder { paging: None, rules: self.rules, items: Vec::new(), runs: Vec::new(), left: 0, right: 0, width: w,
                                         align: if cell.tag == "th" { Align::Center } else { Align::Left }, band: false,
                                         first_indent: 0, lang: self.lang, pending_gap: 0, bars: Vec::new() };
                 let mut l2 = (false, 1, 0);
@@ -1503,15 +1552,19 @@ pub fn lang_static(code: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------- pages
-/// A card side's pages for a body `width` x `height`. `css` is the note type's.
-/// `deck_lang` is the deck's language, for a card too short to tell its own.
-pub fn layout(html: &str, css: &str, width: i32, height: i32, deck_lang: &str) -> Vec<Vec<Item>> {
+/// One page of a card side for a body `width` x `height`, and how many pages the side has so
+/// far: the layout stops once page `want` is complete, so `more` says whether pages follow.
+/// `css` is the note type's; `deck_lang` is the deck's language, for a card too short to tell
+/// its own. Only page `want` is drawn and kept.
+pub fn layout(html: &str, css: &str, width: i32, height: i32, deck_lang: &str, want: usize) -> (Vec<Item>, usize, bool) {
     let root = parse(html);
     unsafe { CSS_WIDTH = width as f32 / PX };
     let rules = parse_css(css);
     let lang = crate::hyph::guess_lang_sure(&plain_text(&root)).unwrap_or_else(|| lang_static(deck_lang));
+    let paging = Paging { height, want, page: 0, used: 0, started: false };
     let mut b = Builder { rules: &rules, items: Vec::new(), runs: Vec::new(), left: 0, right: 0, width,
-                          align: Align::Center, band: false, first_indent: 0, lang, pending_gap: 0, bars: Vec::new() };
+                          align: Align::Center, band: false, first_indent: 0, lang, pending_gap: 0, bars: Vec::new(),
+                          paging: Some(paging) };
     // Anki's default card: 20 px, centred, black.
     let look = Look { px: 20.0, sans: false, bold: false, italic: false, underline: false, strike: false, color: dsn::BLACK,
                       mark: false, align: Align::Center, line: 1.0, pos: Pos::Normal, upper: 0, pre: false };
@@ -1520,28 +1573,13 @@ pub fn layout(html: &str, css: &str, width: i32, height: i32, deck_lang: &str) -
     b.walk(&root, look, &mut anc, &mut list);
     b.flush();
     gfx::forget_spine();
-    let mut pages: Vec<Vec<Item>> = Vec::new();
-    let mut page: Vec<Item> = Vec::new();
-    let mut used = 0;
-    for it in b.items {
-        let h = it.height();
-        if used + h > height && !page.is_empty() {
-            while page.last().is_some_and(|i| matches!(i, Item::Gap { .. })) {
-                page.pop();
-            }
-            pages.push(core::mem::take(&mut page));
-            used = 0;
-        }
-        if used == 0 && matches!(it, Item::Gap { .. }) {
-            continue;
-        }
-        used += h;
-        page.push(it);
+    let p = b.paging.take().unwrap_or(Paging { height, want, page: 0, used: 0, started: false });
+    let mut items = b.items;
+    while items.last().is_some_and(|i| matches!(i, Item::Gap { .. })) {
+        items.pop();
     }
-    if !page.is_empty() || pages.is_empty() {
-        pages.push(page);
-    }
-    pages
+    let more = p.page > want;
+    (items, p.page.min(want) + 1, more)
 }
 
 /// Draws a page with its top-left at (x, y).

@@ -155,7 +155,7 @@ pub fn import() {
         let mut info = DeckInfo::read(&key).unwrap_or_else(|| DeckInfo::new(&key, &language_name(lang), false, ""));
         info.lang = String::from(lang.split(['-', '_']).next().unwrap_or(lang));
         info.name = language_name(lang);
-        if store::write_ids(&key, &ids) && store::write_sides(&key, &sides) && info.write() {
+        if store::write_ids(&key, &ids) && store::Sides::open(&key).replace_all(sides) && info.write() {
             store::write_file(&format!("{}.src", key), stamp.as_bytes());
         }
         if !keys.contains(&key) {

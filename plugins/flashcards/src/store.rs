@@ -2,7 +2,7 @@
 //! files and cannot make folders, so each deck keeps a few flat files in the plugin folder:
 //!   <key>.json   the deck: its name, service, server id and Anki preset, last pulled review
 //!   <key>.ids    its cards in Anki's order: u64 card, u64 note, u8 flags
-//!   <key>.cards  the cards' two sides as plain text (see Side)
+//!   <key>.sx     where each card's sides are, and <key>.s<n> the sides in chunks (see Sides)
 //!   <key>.state  progress: u16 day, u16 new today, then 24-byte CardState records sorted by id
 //!   <key>.log    ratings not yet sent to Anki, 24 bytes each
 //!   <key>.steps  when cards between learning steps fall due: u64 card, i64 unix seconds
@@ -61,12 +61,6 @@ const EPOCH_2020: i64 = 18262; // 2020-01-01 as days since 1970
 static mut TZ: i64 = 0;
 static mut LAST_DAY: i32 = -1;
 
-/// An ISO time ("2026-11-21T09:15:44.000Z", as the server stamps) as unix seconds.
-pub fn iso_seconds(t: &str) -> Option<i64> {
-    let n = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
-    let days = days_from_civil(n(0, 4)? as i32, n(5, 7)? as u32, n(8, 10)? as u32);
-    Some(days * 86400 + n(11, 13)? * 3600 + n(14, 16)? * 60 + n(17, 19)?)
-}
 pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y } as i64;
     let era = y.div_euclid(400);
@@ -365,11 +359,8 @@ pub fn write_ids(key: &str, ids: &[CardRecord]) -> bool {
     write_file(&format!("{}.ids", key), &b)
 }
 
-// A card side is plain text: one entry per line, "T" text (\x01..\x02 around bold), "R" a rule
-// (Anki's <hr id=answer>), "I" an image's name.
-/// Every card's sides: u32 count, then per card u64 id, u32 + front, u32 + back.
-pub fn read_sides(key: &str) -> Vec<(u64, String, String)> {
-    let b = read_file(&format!("{}.cards", key)).unwrap_or_default();
+/// A chunk of sides: u32 count, then per card u64 id, u32 + front, u32 + back.
+fn decode_sides(b: &[u8]) -> Vec<(u64, String, String)> {
     let mut out = Vec::new();
     if b.len() < 4 {
         return out;
@@ -390,7 +381,7 @@ pub fn read_sides(key: &str) -> Vec<(u64, String, String)> {
     }
     out
 }
-pub fn write_sides(key: &str, sides: &[(u64, String, String)]) -> bool {
+fn encode_sides(sides: &[(u64, String, String)]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&(sides.len() as u32).to_le_bytes());
     for (id, f, bk) in sides {
@@ -400,7 +391,233 @@ pub fn write_sides(key: &str, sides: &[(u64, String, String)]) -> bool {
             b.extend_from_slice(s.as_bytes());
         }
     }
-    write_file(&format!("{}.cards", key), &b)
+    b
+}
+/// One card's sides out of a chunk, without decoding the others.
+fn find_side(b: &[u8], want: u64) -> Option<(String, String)> {
+    let n = u32::from_le_bytes(b.get(0..4)?.try_into().ok()?) as usize;
+    let mut p = 4;
+    for _ in 0..n {
+        let id = u64::from_le_bytes(b.get(p..p + 8)?.try_into().ok()?);
+        p += 8;
+        let flen = u32::from_le_bytes(b.get(p..p + 4)?.try_into().ok()?) as usize;
+        let front = p + 4;
+        let blen = u32::from_le_bytes(b.get(front + flen..front + flen + 4)?.try_into().ok()?) as usize;
+        let back = front + flen + 4;
+        if id == want {
+            let text = |r: core::ops::Range<usize>| Some(String::from_utf8_lossy(b.get(r)?).into_owned());
+            return Some((text(front..front + flen)?, text(back..back + blen)?));
+        }
+        p = back + blen;
+    }
+    None
+}
+fn side_bytes(s: &(u64, String, String)) -> usize { 16 + s.1.len() + s.2.len() }
+
+/// A deck's card sides, kept in chunks so neither a review nor a sync holds the whole deck:
+///   <key>.sx    the index: u64 card, u16 chunk, sorted by card
+///   <key>.s<n>  a chunk of about CHUNK_BYTES of sides (decode_sides)
+/// New cards go into the last chunk; a chunk left empty is deleted. A deck still in the older
+/// single <key>.cards file is split into chunks when first opened.
+pub struct Sides {
+    key: String,
+    index: Vec<(u64, u16)>,
+    cache: core::cell::RefCell<Option<(u16, Vec<u8>)>>, // the last chunk read, as it is on the card
+    next_chunk: u16,
+    raw: Vec<u8>, // opened for reading only (a review): the index as it is on the card
+    deferred: bool, // a sync adding many chunks: the index is written by flush_index
+    unsorted: bool, // add_chunk appended to the index; sorted before it is searched
+}
+const CHUNK_BYTES: usize = 64 * 1024;
+impl Sides {
+    pub fn open(key: &str) -> Sides {
+        let b = read_file(&format!("{}.sx", key));
+        let mut sides = Sides { key: String::from(key), index: Vec::new(), cache: core::cell::RefCell::new(None), next_chunk: 0, raw: Vec::new(),
+                                deferred: false, unsorted: false };
+        match b {
+            Some(b) => {
+                sides.index = b.chunks_exact(10)
+                    .map(|c| (u64::from_le_bytes(c[0..8].try_into().unwrap()), u16::from_le_bytes([c[8], c[9]]))).collect();
+            }
+            None => {
+                if let Some(old) = read_file(&format!("{}.cards", key)) {
+                    if sides.replace_all(decode_sides(&old)) {
+                        delete_file(&format!("{}.cards", key));
+                    }
+                }
+            }
+        }
+        sides
+    }
+    /// For reading only, as a review does: the index stays as the card's bytes (10 a card)
+    /// instead of being copied into a list.
+    pub fn open_read(key: &str) -> Sides {
+        match read_file(&format!("{}.sx", key)) {
+            Some(raw) => Sides { key: String::from(key), index: Vec::new(), cache: core::cell::RefCell::new(None), next_chunk: 0,
+                                 raw, deferred: false, unsorted: false },
+            None => Sides::open(key),
+        }
+    }
+    fn chunk_of(&self, id: u64) -> Option<u16> {
+        if self.raw.is_empty() {
+            return self.index.binary_search_by_key(&id, |e| e.0).ok().map(|i| self.index[i].1);
+        }
+        let (mut lo, mut hi) = (0usize, self.raw.len() / 10);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let e = &self.raw[mid * 10..mid * 10 + 10];
+            let have = u64::from_le_bytes(e[0..8].try_into().unwrap());
+            if have == id {
+                return Some(u16::from_le_bytes([e[8], e[9]]));
+            }
+            if have < id { lo = mid + 1 } else { hi = mid }
+        }
+        None
+    }
+    fn chunk_name(&self, n: u16) -> String { format!("{}.s{}", self.key, n) }
+    fn read_chunk(&self, n: u16) -> Vec<(u64, String, String)> {
+        decode_sides(&read_file(&self.chunk_name(n)).unwrap_or_default())
+    }
+    fn write_index(&mut self) -> bool {
+        if self.deferred {
+            return true;
+        }
+        self.sort();
+        let mut b = Vec::with_capacity(self.index.len() * 10);
+        for (id, c) in &self.index {
+            b.extend_from_slice(&id.to_le_bytes());
+            b.extend_from_slice(&c.to_le_bytes());
+        }
+        write_file(&format!("{}.sx", self.key), &b)
+    }
+    fn chunks(&self) -> Vec<u16> {
+        let mut c: Vec<u16> = self.index.iter().map(|e| e.1).collect();
+        c.sort_unstable();
+        c.dedup();
+        c
+    }
+    fn sort(&mut self) {
+        if self.unsorted {
+            self.index.sort_unstable_by_key(|e| e.0);
+            self.index.dedup_by_key(|e| e.0);
+            self.unsorted = false;
+        }
+    }
+    pub fn reserve(&mut self, more: usize) { self.index.reserve_exact(more); }
+    /// Many chunks to come: the index is kept in memory until flush_index.
+    pub fn defer_index(&mut self) { self.deferred = true; }
+    /// Writes the index now (and from now on after every change).
+    pub fn flush_index(&mut self) -> bool {
+        self.deferred = false;
+        self.write_index()
+    }
+    /// A whole chunk as the server packed it (decode_sides' format), written as it is.
+    pub fn add_chunk(&mut self, ids: &[u64], bytes: &[u8]) -> bool {
+        if self.next_chunk == 0 {
+            self.next_chunk = self.index.iter().map(|e| e.1).max().map_or(0, |c| c + 1);
+        }
+        let chunk = self.next_chunk;
+        self.next_chunk += 1;
+        if !write_file(&self.chunk_name(chunk), bytes) {
+            return false;
+        }
+        self.index.extend(ids.iter().map(|id| (*id, chunk)));
+        self.unsorted = true;
+        self.write_index()
+    }
+    pub fn has(&mut self, id: u64) -> bool {
+        self.sort();
+        self.index.binary_search_by_key(&id, |e| e.0).is_ok()
+    }
+    /// A card's front and back, read from its chunk (the last chunk read is kept).
+    pub fn get(&self, id: u64) -> Option<(String, String)> {
+        let chunk = self.chunk_of(id)?;
+        let mut cache = self.cache.borrow_mut();
+        if cache.as_ref().map(|c| c.0) != Some(chunk) {
+            *cache = Some((chunk, read_file(&self.chunk_name(chunk)).unwrap_or_default()));
+        }
+        find_side(&cache.as_ref()?.1, id)
+    }
+    /// Up to n sides, from the first chunks (to guess a deck's language).
+    pub fn sample(&self, n: usize) -> Vec<(u64, String, String)> {
+        let mut out = Vec::new();
+        for c in self.chunks() {
+            if out.len() >= n {
+                break;
+            }
+            out.extend(self.read_chunk(c).into_iter().take(n - out.len()));
+        }
+        out
+    }
+    /// Drops the cards `keep` says no to; only their chunks are rewritten.
+    pub fn retain(&mut self, keep: impl Fn(u64) -> bool) -> bool {
+        self.sort();
+        let mut touched: Vec<u16> = self.index.iter().filter(|e| !keep(e.0)).map(|e| e.1).collect();
+        if touched.is_empty() {
+            return true;
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        *self.cache.borrow_mut() = None;
+        let mut ok = true;
+        for c in touched {
+            let mut list = self.read_chunk(c);
+            list.retain(|s| keep(s.0));
+            ok &= if list.is_empty() {
+                delete_file(&self.chunk_name(c));
+                true
+            } else {
+                write_file(&self.chunk_name(c), &encode_sides(&list))
+            };
+        }
+        self.index.retain(|e| keep(e.0));
+        ok && self.write_index()
+    }
+    /// Adds new cards (or replaces cards already here) at the end of the last chunk.
+    pub fn add(&mut self, new: Vec<(u64, String, String)>) -> bool {
+        if new.is_empty() {
+            return true;
+        }
+        self.sort();
+        let ids: Vec<u64> = new.iter().map(|s| s.0).collect();
+        if ids.iter().any(|id| self.has(*id)) && !self.retain(|id| !ids.contains(&id)) {
+            return false;
+        }
+        *self.cache.borrow_mut() = None;
+        let mut chunk = self.chunks().last().copied().unwrap_or(0);
+        let mut list = if self.index.is_empty() { Vec::new() } else { self.read_chunk(chunk) };
+        let mut size: usize = list.iter().map(side_bytes).sum();
+        let mut ok = true;
+        for s in new {
+            if size >= CHUNK_BYTES && !list.is_empty() {
+                ok &= write_file(&self.chunk_name(chunk), &encode_sides(&list));
+                list.clear();
+                size = 0;
+                chunk += 1;
+            }
+            size += side_bytes(&s);
+            self.index.push((s.0, chunk));
+            list.push(s);
+        }
+        self.next_chunk = 0; // worked out again from the index by the next add_chunk
+        // Sorted once at the end (inserting one by one is quadratic for a big deck).
+        self.index.sort_unstable_by_key(|e| e.0);
+        self.index.dedup_by_key(|e| e.0);
+        ok &= write_file(&self.chunk_name(chunk), &encode_sides(&list));
+        ok && self.write_index()
+    }
+    /// Every side anew (a mined-words deck rebuilt from its export, or an old .cards file).
+    pub fn replace_all(&mut self, all: Vec<(u64, String, String)>) -> bool {
+        for c in self.chunks() {
+            delete_file(&self.chunk_name(c));
+        }
+        self.index.clear();
+        *self.cache.borrow_mut() = None;
+        if all.is_empty() {
+            return self.write_index();
+        }
+        self.add(all)
+    }
 }
 
 // ---------------------------------------------------------------- progress
@@ -672,7 +889,7 @@ pub struct Session {
     leeches: Vec<u64>,
     unsaved: u8,
     pending_log: Vec<LogEntry>,
-    sides: Vec<(u64, String, String)>,
+    sides: Sides,
 }
 
 fn ms_now() -> i64 {
@@ -714,7 +931,7 @@ impl Session {
             leeches: Vec::new(),
             unsaved: 0,
             pending_log: Vec::new(),
-            sides: read_sides(key),
+            sides: Sides::open_read(key),
         };
         if s.leech_threshold > 0 && s.leech_suspend {
             s.leeches = read_leeches(key);
@@ -736,7 +953,11 @@ impl Session {
             .collect();
         let wall = now();
         let ms = ms_now();
-        for c in read_ids(&self.key) {
+        // The card list read as it is on the card, not copied into records first.
+        let ids_file = read_file(&format!("{}.ids", self.key)).unwrap_or_default();
+        for r in ids_file.chunks_exact(17) {
+            let c = CardRecord { id: u64::from_le_bytes(r[0..8].try_into().unwrap()),
+                                 note: u64::from_le_bytes(r[8..16].try_into().unwrap()), flags: r[16] };
             if self.leeches.binary_search(&c.id).is_ok() {
                 continue;
             }
@@ -841,14 +1062,14 @@ impl Session {
         }
     }
     /// The current card's two sides, and whether it was too large to fetch.
-    pub fn current(&self) -> Option<(&str, &str, bool)> {
+    pub fn current(&self) -> Option<(String, String, bool)> {
         if self.finished() {
             return None;
         }
         let item = self.active();
         let too_large = item.flags & TOO_LARGE != 0;
-        self.sides.iter().find(|s| s.0 == item.id).map(|s| (s.1.as_str(), s.2.as_str(), too_large))
-            .or(Some(("", "", too_large)))
+        let (f, b) = self.sides.get(item.id).unwrap_or_default();
+        Some((f, b, too_large))
     }
 
     // A learning card whose step has passed comes first; with nothing else left, the next one is

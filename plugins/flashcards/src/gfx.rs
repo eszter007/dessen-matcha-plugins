@@ -302,6 +302,16 @@ struct Block {
     data: Option<Vec<u8>>,
 }
 static mut BLOCKS: Vec<Block> = Vec::new();
+const BLOCKS_MAX: usize = 256 * 1024;
+/// Lets go of the loaded glyph blocks once they pass BLOCKS_MAX (they are read again when
+/// needed). Only between cards and screens: a glyph drawn earlier points into its block.
+pub fn trim_glyph_cache() {
+    let blocks = unsafe { &mut *core::ptr::addr_of_mut!(BLOCKS) };
+    let size: usize = blocks.iter().map(|b| b.data.as_ref().map_or(0, |d| d.len())).sum();
+    if size > BLOCKS_MAX {
+        *blocks = Vec::new();
+    }
+}
 
 fn block(face: u8, blk: u8) -> Option<&'static [u8]> {
     // Single-threaded app: the cache is only touched from here.

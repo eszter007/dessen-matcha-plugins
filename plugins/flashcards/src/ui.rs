@@ -363,6 +363,8 @@ struct Review {
     show_back: bool,
     selected: usize,
     pages: Vec<Vec<Item>>,
+    styled: bool, // the side is HTML: pages[page] alone is laid out
+    more: bool,   // pages after the last counted one may follow
     page: usize,
     intervals: [Interval; 4],
     mined: Option<store::Mined>, // a word mined in matcha: drawn on matcha's spine card
@@ -371,7 +373,7 @@ struct Review {
 
 impl Review {
     fn open(key: &str) -> Review {
-        let mut r = Review { session: Session::open(key), show_back: false, selected: 2, pages: Vec::new(), page: 0, intervals: Default::default(), mined: None, keys: false };
+        let mut r = Review { session: Session::open(key), show_back: false, selected: 2, pages: Vec::new(), styled: false, more: false, page: 0, intervals: Default::default(), mined: None, keys: false };
         r.load_card();
         r
     }
@@ -382,29 +384,58 @@ impl Review {
         self.intervals = self.session.previews();
     }
     fn layout_side(&mut self) {
+        self.pages = Vec::new();
+        crate::gfx::trim_glyph_cache();
         self.page = 0;
-        self.mined = self.session.current().and_then(|c| store::decode_mined(c.0));
+        self.styled = false;
+        let current = self.session.current();
+        self.mined = current.as_ref().and_then(|c| store::decode_mined(&c.0));
         // An Anki card's CJK text in the cut of its language, read from both sides.
-        if let Some((f, b, _)) = self.session.current() {
-            gfx::set_script(gfx::detect_script([f, b].into_iter()));
+        if let Some((f, b, _)) = &current {
+            gfx::set_script(gfx::detect_script([f.as_str(), b.as_str()].into_iter()));
         }
         if self.mined.is_some() {
             self.pages = Vec::new();
             return;
         }
-        self.pages = match self.session.current() {
+        self.pages = match current {
             Some((f, b, false)) => {
-                let side = if self.show_back { b } else { f };
+                let side: &str = if self.show_back { &b } else { &f };
                 match store::decode_html(side) {
-                    Some((css, html)) => {
-                        let body = body_rect();
-                        crate::cardhtml::layout(html, &css, body.w, body.h, self.session.lang()).into_iter().map(|p| alloc::vec![Item::Styled(p)]).collect()
+                    Some(_) => {
+                        self.styled = true;
+                        self.styled_page(side)
                     }
                     None => layout(side),
                 }
             }
             _ => Vec::new(),
         };
+    }
+    /// A styled side's pages: only the current one laid out and drawn, the others left empty.
+    fn styled_page(&mut self, side: &str) -> Vec<Vec<Item>> {
+        let Some((css, html)) = store::decode_html(side) else { return Vec::new() };
+        let body = body_rect();
+        // The pages before it are drawn too, then dropped; only this page is kept.
+        let (items, count, more) = crate::cardhtml::layout(html, &css, body.w, body.h, self.session.lang(), self.page);
+        // Pages after this one are only known to exist: one more is counted, shown as "...".
+        self.more = more;
+        let count = count + more as usize;
+        let mut pages: Vec<Vec<Item>> = (0..count).map(|_| Vec::new()).collect();
+        if let Some(p) = pages.get_mut(self.page.min(count - 1)) {
+            *p = alloc::vec![Item::Styled(items)];
+        }
+        pages
+    }
+    /// Another page of the side shown: a styled side is laid out again for it.
+    fn turn_page(&mut self, page: usize) {
+        self.page = page;
+        if self.styled {
+            if let Some((f, b, _)) = self.session.current() {
+                let side = if self.show_back { b } else { f };
+                self.pages = self.styled_page(&side);
+            }
+        }
     }
     fn rate(&mut self, i: usize) {
         self.session.rate(fsrs::Rating::from(i as u8 + 1));
@@ -452,7 +483,7 @@ impl Review {
                 y += item_height(it);
             }
             if self.pages.len() > 1 {
-                let count = format!("{} / {}", self.page + 1, self.pages.len());
+                let count = if self.more { format!("{} / ...", self.page + 1) } else { format!("{} / {}", self.page + 1, self.pages.len()) };
                 let tw = gfx::text_width(SMALL, &count);
                 gfx::text(c.x + 6 + c.w - 12 - 18 - tw, c.y + 6 + c.h - 12 - 26, SMALL, &count, dsn::BLACK);
             }
@@ -557,8 +588,8 @@ impl Review {
                     }
                 }
                 // A long side pages first, as the side buttons do in matcha.
-                dsn::EV_NEXT | dsn::EV_SWIPE_UP if multi && self.page + 1 < self.pages.len() => self.page += 1,
-                dsn::EV_PREV | dsn::EV_SWIPE_DOWN if multi && self.page > 0 => self.page -= 1,
+                dsn::EV_NEXT | dsn::EV_SWIPE_UP if multi && self.page + 1 < self.pages.len() => self.turn_page(self.page + 1),
+                dsn::EV_PREV | dsn::EV_SWIPE_DOWN if multi && self.page > 0 => self.turn_page(self.page - 1),
                 dsn::EV_CONFIRM | dsn::EV_NEXT | dsn::EV_PREV if !self.show_back => {
                     self.show_back = true;
                     self.layout_side();
@@ -956,6 +987,7 @@ pub fn run() {
                 }
                 let key = d.key.clone();
                 Review::open(&key).run();
+                crate::gfx::trim_glyph_cache();
             } else {
                 return false;
             }

@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for Alloc {
 }
 #[global_allocator]
 static HEAP: Alloc = Alloc(UnsafeCell::new(Heap::empty()));
-const HEAP_SIZE: usize = 3456 * 1024; // of the 4 MB a PSRAM board gives an app
+const HEAP_SIZE: usize = 1856 * 1024; // of the app's 2.5 MB (Makefile), after the code and the stack
 static mut ARENA: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 /// A panic ends the app; where and why goes to panic.txt in the plugin folder, for bug reports.
