@@ -144,15 +144,17 @@ pub fn blit(c: &Canvas, x: i32, y: i32, color: u32) {
 // ---------------------------------------------------------------- fonts
 // fonts/<face>/<block>.bin from tools/matcha_fonts.py: u16 count, count x {u16 low, u8 w, u8 h,
 // u16 advance (12.4), i16 left, i16 top, u32 offset}, then 1-bit bitmaps.
-const FACE_DIR: [&str; 49] = [
+const FACE_DIR: [&str; 53] = [
     "s", "r10", "b10", "r12", "b12", "j8", "j12", "c8", "c12", "n14", "n14b", "k14", "hero", "n18b", "n12", "n12b", "n12i", "sp", "spk",
     "spmj", "spkj", "spkt", "spkk", "k14j", "k14t", "k14k", "sym",
     "n14i", "n18", "n24", "n24b", "k20", "k20j", "k20t", "k20k",
     "ar8", "ar10", "ar10b", "ar12", "ar12b", "ar14", "ar14b", "ar18", "ar24", "he12", "he14", "he14b", "he18", "he24",
+    "k32", "k32j", "k32t", "k32k",
 ];
-const FACE_ASC: [i32; 49] = [16, 20, 20, 24, 24, 20, 29, 20, 29, 32, 32, 34, 101, 41, 27, 27, 27, 89, 87, 67, 87, 87, 87, 34, 34, 34, 32,
+const FACE_ASC: [i32; 53] = [16, 20, 20, 24, 24, 20, 29, 20, 29, 32, 32, 34, 101, 41, 27, 27, 27, 89, 87, 67, 87, 87, 87, 34, 34, 34, 32,
     32, 41, 54, 54, 49, 49, 49, 49,
-    24, 29, 29, 35, 35, 40, 40, 53, 69, 27, 31, 31, 41, 54];
+    24, 29, 29, 35, 35, 40, 40, 53, 69, 27, 31, 31, 41, 54,
+    78, 78, 78, 78];
 const S: u8 = 0;
 const R10: u8 = 1;
 const B10: u8 = 2;
@@ -206,6 +208,10 @@ const HE14: u8 = 45;
 const HE14B: u8 = 46;
 const HE18: u8 = 47;
 const HE24: u8 = 48;
+const K32: u8 = 49;
+const K32J: u8 = 50;
+const K32T: u8 = 51;
+const K32K: u8 = 52;
 
 /// A text style: its face, the faces it falls back to, and whether borrowed glyphs are thickened.
 #[derive(Clone, Copy)]
@@ -269,7 +275,7 @@ pub fn spine_cjk(sc: Script, ruby: bool) -> Style {
 /// Lets go of the spine faces' big blocks once the word is drawn.
 pub fn forget_spine() {
     let blocks = unsafe { &mut *core::ptr::addr_of_mut!(BLOCKS) };
-    blocks.retain(|b| !matches!(b.face, SPK | SPMJ | SPKJ | SPKT | SPKK));
+    blocks.retain(|b| !matches!(b.face, SPK | SPMJ | SPKJ | SPKT | SPKK | K32 | K32J | K32T | K32K));
 }
 /// Whether `c` is an ideograph only Traditional Chinese uses (fonts/tc.bin: Big5, not GB2312).
 pub fn traditional_only(c: char) -> bool {
@@ -354,6 +360,7 @@ fn glyph(st: Style, c: char) -> Option<(Glyph, bool)> {
     let lang = |f: u8| match f {
         K14 => body_cjk(unsafe { SCRIPT }),
         K20 => match unsafe { SCRIPT } { Script::Sc => K20, Script::Tc => K20T, Script::Jp => K20J, Script::Kr => K20K },
+        K32 => match unsafe { SCRIPT } { Script::Sc => K32, Script::Tc => K32T, Script::Jp => K32J, Script::Kr => K32K },
         SPK => match unsafe { SCRIPT } { Script::Sc => SPK, Script::Tc => SPKT, Script::Jp => SPKJ, Script::Kr => SPKK },
         _ => f,
     };
@@ -413,7 +420,7 @@ pub fn detect_script<'a>(texts: impl Iterator<Item = &'a str> + Clone) -> Script
 
 /// The face's ascender: how far below a line's top its baseline sits.
 /// The first face of the card renderer's table (cardfaces.rs), after the built-in ones.
-pub const CARD_FACE0: u8 = 49;
+pub const CARD_FACE0: u8 = 53;
 fn face_dir(face: u8) -> &'static str {
     if face >= CARD_FACE0 { crate::cardfaces::FACES[(face - CARD_FACE0) as usize].0 } else { FACE_DIR[face as usize] }
 }
@@ -425,8 +432,8 @@ fn face_asc(face: u8) -> i32 {
 pub fn card_style(family: usize, size: usize, bold: bool, italic: bool) -> Style {
     let i = (family.min(1) * 8 + size.min(7)) * 4 + if bold && italic { 3 } else if italic { 2 } else if bold { 1 } else { 0 };
     let (_, _, line_h) = crate::cardfaces::FACES[i];
-    // Large CJK (a word over its sentence) in the 36 pt serif: the sans stops at 20 pt.
-    let cjk = match size { 0..=2 => K14, 3..=5 => K20, _ => SPK };
+    // Large CJK (a word over its sentence): the 32 pt sans, or the 36 pt serif when bold.
+    let cjk = match size { 0..=2 => K14, 3..=5 => K20, _ => if bold { SPK } else { K32 } };
     Style { face: CARD_FACE0 + i as u8, fallback: [cjk, K14], bold, line_h }
 }
 pub fn same_face(a: Style, b: Style) -> bool { a.face == b.face }

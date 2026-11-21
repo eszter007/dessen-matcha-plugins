@@ -31,7 +31,7 @@ You need:
 - CrossPoint built with Dessen apps, and **Settings → Connectivity → Plugins** turned on
   (see the [repository README](../../../README.md)).
 - A board with PSRAM: the plugin asks for 4 MB of app memory.
-- About 125 MB free on the SD card, almost all of it fonts.
+- About 170 MB free on the SD card, almost all of it fonts.
 - [matcha-anki-server](https://github.com/eszter007/matcha-anki-server) running on your
   network, connected to Anki (and to Migaku if you use it).
 
@@ -137,7 +137,9 @@ What the renderer handles:
 - **Pictures:** sized by `width`/`height` attributes or CSS; small ones (icons, stars) sit in the
   line. They are stored as 1-bit pictures, dithered.
 - **Right to left:** Arabic is joined, and Hebrew, Arabic and Persian are set right to left,
-  also inside a left-to-right line.
+  also inside a left-to-right line (punctuation goes where the Unicode bidi rules put it).
+- **Large CJK** (a 56 px word over its sentence) in Noto Sans CJK at 32 pt, or Noto Serif CJK
+  Bold at 36 pt when bold.
 - **Old decks:** `<font color size face>`, `align=`, `<center>`.
 
 CSS is read as a subset: tag, `.class` and `#id` selectors with descendants (child selectors
@@ -221,6 +223,12 @@ Each sync, per service (Anki, then Migaku):
    sync, then the device's reviews and the resulting schedules go to Anki.
 4. The server syncs with AnkiWeb again.
 
+Cards that arrive already studied in Anki (a deck synced for the first time, or a mined word
+already in Anki) start with their Anki progress: their review history is replayed and Anki's
+FSRS memory taken over. A card with no history to replay (rescheduled by hand) takes Anki's
+schedule as it is; this needs matcha-anki-server's `dessen` branch, which tells the device
+Anki's day count (`device.today`), and otherwise counts the card due today.
+
 The result shows per service: new cards, reviews received, reviews sent. If AnkiWeb could not be
 synced it says so, and the next sync tries again. If AnkiWeb is waiting for you to choose which
 copy to keep (a full sync), the sync stops before sending anything: choose in Anki, then sync
@@ -262,11 +270,7 @@ In `/plugins/flashcards/`:
 ## Limits
 
 - Pictures are black and white (dithered); matcha's greyscale pass needs firmware support.
-- Large Japanese, Chinese and Korean text without bold is set in the bold 36 pt serif: there is
-  no large regular CJK cut.
-- In a left-to-right line, a full stop right after Arabic can land on the wrong side.
-- A reviewed card that a cut-off hand-over found already in Anki keeps Anki's schedule, but the
-  plugin does not read that schedule until the card is reviewed in Anki again.
+- A sync cannot be stopped half way (see above).
 - The plugin opens about a second after you choose it (the Home screen is drawn first), and the
   first sync of a big deck is slow: apps run in a sandbox at about 1.5 million instructions a
   second.

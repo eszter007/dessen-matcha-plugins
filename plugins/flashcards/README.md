@@ -15,7 +15,7 @@ Setup: open Flashcards, choose the settings icon at the right of the title,
 then Flashcards Sync: enter the server address, its key and your Anki or
 Migaku decks. Back on the deck list, choose Sync Flashcards.
 
-Needs a board with PSRAM (4 MB of app memory) and about 125 MB on the SD card.
+Needs a board with PSRAM (4 MB of app memory) and about 170 MB on the SD card.
 The screens follow CrossPoint's language.
 
 User guide with screenshots:

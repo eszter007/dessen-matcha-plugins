@@ -175,12 +175,18 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
     let missing: Vec<u64> = ids.iter().copied().filter(|id| !sides.iter().any(|s| s.0 == *id)).collect();
     // Notes for the cards not seen before (burying needs them).
     let mut notes: Vec<(u64, u64)> = known.iter().map(|r| (r.id, r.note)).collect();
+    // Cards new to the device that were already studied in Anki, with Anki's FSRS memory.
+    let mut studied: Vec<(u64, Value)> = Vec::new();
     for chunk in missing.chunks(50) {
         let list: Vec<String> = chunk.iter().map(|i| format!("{}", i)).collect();
         let got = client.call("cards.getMany", json!({"ids": list}))?;
         for item in got.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(r) = item.get("result") {
                 notes.push((id_str(&r["id"]), id_str(&r["noteId"])));
+                let sch = &r["scheduling"];
+                if sch["type"].as_str().is_some_and(|t| t != "new") {
+                    studied.push((id_str(&r["id"]), sch.clone()));
+                }
             }
         }
     }
@@ -240,6 +246,7 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
     progress.show(&title, "");
     // Pull before push: Anki's reviews land first, then the device's own go out on top.
     pull_reviews(client, &mut info, totals)?;
+    seed_studied(client, &info.key, &studied)?;
     push_reviews(client, &mut info, &ids, totals)?;
     if let Ok(latest) = client.call("reviews.getLatestId", json!({"deck": {"id": server_id}})) {
         info.last_review_id = info.last_review_id.max(id_str(&latest["id"]));
@@ -295,6 +302,86 @@ fn base64(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Cards that arrive already studied in Anki (a deck synced for the first time, or a mined word a
+/// cut-off hand-over found in Anki) and have no progress here: their own review history is
+/// replayed, as pulled reviews are, and Anki's FSRS memory is taken where it has one.
+fn seed_studied(client: &mut Client, key: &str, studied: &[(u64, Value)]) -> Result<(), Error> {
+    let (states, _, _) = store::load_states(key);
+    let todo: Vec<&(u64, Value)> = studied.iter().filter(|s| states.binary_search_by_key(&s.0, |c| c.id).is_err()).collect();
+    if todo.is_empty() {
+        return Ok(());
+    }
+    for chunk in todo.chunks(50) {
+        let ids: Vec<String> = chunk.iter().map(|s| format!("{}", s.0)).collect();
+        let mut pulled: Vec<Pulled> = Vec::new();
+        let mut cursor = Value::Null;
+        loop {
+            let mut params = json!({"cardIds": ids, "includeManual": false, "limit": 200});
+            if !cursor.is_null() {
+                params["cursor"] = cursor.clone();
+            }
+            let page = client.call("reviews.list", params)?;
+            for r in page.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+                let rating = RATING_NAMES.iter().position(|n| r["rating"].as_str() == Some(n)).map(|i| i as u8 + 1).unwrap_or(0);
+                if rating == 0 {
+                    continue;
+                }
+                let interval = if r.pointer("/interval/unit").and_then(|u| u.as_str()) == Some("days") {
+                    r.pointer("/interval/value").and_then(|v| v.as_u64()).unwrap_or(0) as u16
+                } else {
+                    0
+                };
+                pulled.push(Pulled { id: id_str(&r["cardId"]), time_ms: id_str(&r["id"]) as i64, rating, interval });
+            }
+            cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+            if cursor.is_null() {
+                break;
+            }
+        }
+        pulled.sort_by_key(|p| p.time_ms);
+        store::apply_pulled(key, &pulled);
+    }
+    // Anki's own memory is more exact than a replay from a blank card; a card with nothing to
+    // replay (rescheduled by hand, or its history cut off) takes Anki's schedule as it is.
+    // Anki gives its due day in the collection's own count: the server's device.today turns it
+    // into days from today (an older server: due today).
+    let anki_today = client.call("device.today", json!({})).ok().and_then(|v| v["day"].as_i64());
+    let (mut states, day, new_today) = store::load_states(key);
+    let today = store::today() as i64;
+    for (id, sch) in todo {
+        let mem = sch.get("fsrsMemory").filter(|m| !m.is_null())
+            .and_then(|m| Some((m["stabilityDays"].as_f64()? as f32, m["difficulty"].as_f64()? as f32)));
+        let ivl = sch["intervalDays"].as_i64().unwrap_or(0).max(0);
+        let i = match states.binary_search_by_key(id, |c| c.id) {
+            Ok(i) => i,
+            Err(i) => {
+                let due = match (sch.pointer("/due/kind").and_then(|k| k.as_str()), sch.pointer("/due/day").and_then(|d| d.as_i64()), anki_today) {
+                    (Some("day"), Some(d), Some(t)) => today + (d - t),
+                    _ => today,
+                }
+                .clamp(0, u16::MAX as i64);
+                states.insert(i, store::CardState {
+                    id: *id,
+                    stability: ivl.max(1) as f32,
+                    difficulty: 5.0,
+                    due: due as u16,
+                    last_review: (due - ivl).clamp(0, today) as u16,
+                    reps: sch["repetitions"].as_u64().unwrap_or(1).max(1) as u16,
+                    lapses: sch["lapses"].as_u64().unwrap_or(0).min(255) as u8,
+                    flags: 0,
+                });
+                i
+            }
+        };
+        if let Some((stab, diff)) = mem {
+            states[i].stability = stab;
+            states[i].difficulty = diff.clamp(1.0, 10.0);
+        }
+    }
+    store::write_states(key, &states, if day == 0 { store::today() } else { day }, new_today);
+    Ok(())
 }
 
 fn pull_reviews(client: &mut Client, info: &mut DeckInfo, totals: &mut Totals) -> Result<(), Error> {

@@ -5,7 +5,7 @@ are rasterized by the same tool from Noto Serif, k14/ from Noto Sans CJK SC. c8/
 Noto Sans CJK SC (github.com/notofonts/noto-cjk). n12/, n12b/, n12i/ are matcha's Noto Serif 12;
 sp/ is rasterized from Noto Serif Bold (40 pt); spk/, spkt/, spkj/, spmj/ and spkk/ from Noto
 Serif CJK SC, TC, JP (36 and 28 pt) and KR Bold set the word on a mined card's spine; cs*/ and cn*/ are rasterized from Noto Serif and
-Noto Sans (card text, 12-40 pt); k20*/ from Noto Sans CJK SC/JP/TC/KR; ar*/ and he*/ from Noto
+Noto Sans (card text, 12-40 pt); k20*/ and k32*/ from Noto Sans CJK SC/JP/TC/KR; ar*/ and he*/ from Noto
 Sans Arabic and Noto Sans Hebrew (SIL Open Font License 1.1, notofonts); k14j/,
 k14t/ and k14k/ from Noto Sans CJK JP, TC and KR set its text in those languages. tc.bin marks
 the ideographs only Traditional Chinese uses. All from github.com/notofonts/noto-cjk, SIL Open

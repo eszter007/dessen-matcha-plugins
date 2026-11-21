@@ -64,7 +64,7 @@ The Flashcards plugin's data is generated the same way (sources: a matcha-reader
 the Noto CJK fonts from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk)):
 
 - `fonts/`: `tools/matcha_fonts.py` — card text faces `cs*`/`cn*` (Noto Serif/Sans, 12–40 pt,
-  `text` set), CJK faces `k14*`, `k20*` (Noto Sans CJK SC/JP/TC/KR, `cjkall`/`kr` sets, which
+  `text` set), CJK faces `k14*`, `k20*`, `k32*` (Noto Sans CJK SC/JP/TC/KR, `cjkall`/`kr` sets, which
   include the JIS and KS character sets), spine faces `sp`, `spk*`, `spmj` (Noto Serif Bold,
   Noto Serif CJK Bold), Arabic `ar*` and Hebrew `he*` (Noto Sans Arabic/Hebrew); `tc.bin` marks
   the ideographs only Traditional Chinese uses.

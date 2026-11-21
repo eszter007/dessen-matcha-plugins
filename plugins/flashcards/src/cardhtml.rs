@@ -538,7 +538,7 @@ fn run_width(r: &Run) -> i32 {
 fn ruby_style(base: Style) -> Style {
     if base.line_h >= 60 { gfx::UI12 } else if base.line_h >= 44 { gfx::UI10 } else { gfx::SMALL }
 }
-fn is_closing(c: char) -> bool { "。、，．！？）」』】〉》,.!?;:)]}…ー".contains(c) }
+fn is_closing(c: char) -> bool { "。、，．！？）」』】〉》,.!?;:)]}…ー»،؛؟\"'".contains(c) }
 
 // ---------------------------------------------------------------- the builder
 struct Builder<'a> {
@@ -751,22 +751,36 @@ impl Builder<'_> {
         };
         let mut word = String::new();
         let mk = |text: String, space: bool| Run { text, look: *look, style: st, space, ruby: None, image: None, marker: false };
+        // A right-to-left word's trailing punctuation is a run of its own: neutral, it then takes
+        // the direction around it (a full stop after Arabic in an English line goes to its right).
+        // It starts with a closing mark, so it never begins a line.
+        let push_word = |runs: &mut Vec<Run>, w: String| {
+            if crate::rtl::has_rtl(&w) {
+                let cut = w.trim_end_matches(|c: char| ".,;:!?)]}»\"'،؛؟".contains(c)).len();
+                if cut > 0 && cut < w.len() {
+                    runs.push(mk(String::from(&w[..cut]), false));
+                    runs.push(mk(String::from(&w[cut..]), false));
+                    return;
+                }
+            }
+            runs.push(mk(w, false));
+        };
         for c in t.chars() {
             if c == '\n' && look.pre {
                 if !word.is_empty() {
-                    self.runs.push(mk(core::mem::take(&mut word), false));
+                    push_word(&mut self.runs, core::mem::take(&mut word));
                 }
                 self.flush();
             } else if c.is_whitespace() && c != '\u{a0}' {
                 if !word.is_empty() {
-                    self.runs.push(mk(core::mem::take(&mut word), false));
+                    push_word(&mut self.runs, core::mem::take(&mut word));
                 }
                 if look.pre || !self.runs.last().is_some_and(|r| r.space) {
                     self.runs.push(mk(String::from(" "), true));
                 }
             } else if c as u32 >= 0x2E80 {
                 if !word.is_empty() {
-                    self.runs.push(mk(core::mem::take(&mut word), false));
+                    push_word(&mut self.runs, core::mem::take(&mut word));
                 }
                 self.runs.push(mk(c.into(), false));
             } else {
@@ -774,7 +788,7 @@ impl Builder<'_> {
             }
         }
         if !word.is_empty() {
-            self.runs.push(mk(word, false));
+            push_word(&mut self.runs, word);
         }
     }
     fn walk(&mut self, e: &El, parent: Look, ancestors: &mut Vec<*const El>, list: &mut (bool, u32, u32)) {
