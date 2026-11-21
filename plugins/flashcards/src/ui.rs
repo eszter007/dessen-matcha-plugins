@@ -385,7 +385,7 @@ impl Review {
                 match store::decode_html(side) {
                     Some((css, html)) => {
                         let body = body_rect();
-                        crate::cardhtml::layout(html, &css, body.w, body.h).into_iter().map(|p| alloc::vec![Item::Styled(p)]).collect()
+                        crate::cardhtml::layout(html, &css, body.w, body.h, self.session.lang()).into_iter().map(|p| alloc::vec![Item::Styled(p)]).collect()
                     }
                     None => layout(side),
                 }
@@ -412,7 +412,7 @@ impl Review {
         let body = body_rect();
         let cx = body.x + body.w / 2;
         if let Some(m) = &self.mined {
-            crate::spine::draw(m, &crate::spine::Rect { x: c.x + 6, y: c.y + 6, w: c.w - 12, h: c.h - 12 }, self.show_back);
+            crate::spine::draw(m, &crate::spine::Rect { x: c.x + 6, y: c.y + 6, w: c.w - 12, h: c.h - 12 }, self.show_back, self.session.lang());
         } else if self.pages.is_empty() || self.pages.iter().all(|p| p.is_empty()) {
             let too_large = self.session.current().is_some_and(|c| c.2);
             let msg = match (too_large, self.session.is_migaku()) {
@@ -808,7 +808,10 @@ impl SettingsScreen {
                         dsn::fill_round(left - 8, y + 4, right - left + 16, rh - 8, dsn::LIGHT_GRAY, 6);
                     }
                     let ty = y + (ROW_PITCH - UI12.line_h) / 2 - if page { 2 } else { 0 };
-                    let label = &tr(label);
+                    // The value keeps its room (up to half the row); a long label is shortened.
+                    let value_full = if matches!(row, Row::Page(..)) { String::new() } else { Self::value(row) };
+                    let value_w = gfx::text_width(UI12, &value_full).min((right - left) / 2);
+                    let label = &gfx::truncated(UI12, &tr(label), right - left - value_w - 24);
                     let lw = gfx::text_width(UI12, label);
                     let rtl = crate::i18n::rtl();
                     gfx::text(if rtl { right - lw } else { left }, ty, UI12, label, dsn::BLACK);
@@ -821,7 +824,7 @@ impl SettingsScreen {
                         y += rh;
                         continue;
                     }
-                    let value = gfx::truncated(UI12, &Self::value(row), right - left - lw - 24);
+                    let value = gfx::truncated(UI12, &value_full, right - left - lw - 24);
                     let vw = gfx::text_width(UI12, &value);
                     gfx::text(if rtl { left } else { right - vw }, ty, UI12, &value, dsn::BLACK);
                     y += ROW_PITCH;

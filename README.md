@@ -72,6 +72,8 @@ the Noto CJK fonts from [notofonts/noto-cjk](https://github.com/notofonts/noto-c
   Liang patterns).
 - `i18n/`: one JSON file per language code CrossPoint stores (`/.crosspoint/settings.json`);
   `EN.json` is the source.
+  `tools/anki_terms.py` (run with matcha-anki-server's Python, which has the `anki` package) puts
+  Anki's own translations in where Anki has the term.
 
 ## Notes for Dessen apps
 

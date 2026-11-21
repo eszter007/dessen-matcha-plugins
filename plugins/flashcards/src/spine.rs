@@ -35,12 +35,12 @@ fn is_cjk(c: char) -> bool { c as u32 >= 0x2E80 }
 pub fn script(m: &Mined) -> Script { gfx::detect_script([m.word.as_str(), m.sentence.as_str()].into_iter()) }
 
 /// Draws the whole card inside the double rule's inner rectangle.
-pub fn draw(m: &Mined, inner: &Rect, back: bool) {
+pub fn draw(m: &Mined, inner: &Rect, back: bool, deck_lang: &str) {
     let sc = script(m);
     unsafe { SCRIPT = sc };
     gfx::set_script(sc);
     let all = alloc::format!("{} {} {}", m.word, m.sentence, m.definition);
-    unsafe { LANG = crate::hyph::guess_lang(&all) };
+    unsafe { LANG = crate::hyph::guess_lang_sure(&all).unwrap_or_else(|| crate::cardhtml::lang_static(deck_lang)) };
     let japanese = sc == Script::Jp;
     let spine_w = (inner.w * 26 / 100).clamp(90, 160);
     let spine_x = if japanese { inner.x + inner.w - spine_w } else { inner.x };

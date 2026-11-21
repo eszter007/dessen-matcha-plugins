@@ -31,15 +31,74 @@ struct El {
     classes: Vec<String>,
     attrs: Vec<(String, String)>,
     kids: Vec<Node>,
+    pos: usize, // its place among its parent's elements, from 0
+    of: usize,  // how many elements its parent has
 }
 impl El {
     fn attr(&self, k: &str) -> Option<&str> { self.attrs.iter().find(|a| a.0 == k).map(|a| a.1.as_str()) }
 }
 const VOID: [&str; 8] = ["br", "hr", "img", "meta", "link", "input", "wbr", "col"];
-const KEPT_ATTRS: [&str; 11] = ["style", "src", "align", "color", "size", "face", "width", "height", "start", "colspan", "border"];
+/// Every attribute of a start tag, names lower-cased (a bare name has an empty value).
+fn parse_attrs(tag: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let b: Vec<char> = tag.chars().collect();
+    let mut i = b.iter().position(|c| c.is_whitespace()).unwrap_or(b.len());
+    while i < b.len() {
+        while i < b.len() && (b[i].is_whitespace() || b[i] == '/') {
+            i += 1;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_whitespace() && b[i] != '=' && b[i] != '/' {
+            i += 1;
+        }
+        if start == i {
+            break;
+        }
+        let name: String = b[start..i].iter().collect::<String>().to_ascii_lowercase();
+        while i < b.len() && b[i].is_whitespace() {
+            i += 1;
+        }
+        let mut value = String::new();
+        if i < b.len() && b[i] == '=' {
+            i += 1;
+            while i < b.len() && b[i].is_whitespace() {
+                i += 1;
+            }
+            if i < b.len() && (b[i] == '"' || b[i] == '\'') {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    value.push(b[i]);
+                    i += 1;
+                }
+                i += 1;
+            } else {
+                while i < b.len() && !b[i].is_whitespace() {
+                    value.push(b[i]);
+                    i += 1;
+                }
+            }
+        }
+        out.push((name, value));
+    }
+    out
+}
+/// Each element's place among its siblings, for :first-child and its kin.
+fn number(e: &mut El) {
+    let of = e.kids.iter().filter(|k| matches!(k, Node::El(_))).count();
+    let mut pos = 0;
+    for k in e.kids.iter_mut() {
+        if let Node::El(c) = k {
+            c.pos = pos;
+            c.of = of;
+            pos += 1;
+            number(c);
+        }
+    }
+}
 
 fn parse(html: &str) -> El {
-    let root = || El { tag: String::from("body"), id: String::new(), classes: vec![String::from("card")], attrs: Vec::new(), kids: Vec::new() };
+    let root = || El { tag: String::from("body"), id: String::new(), classes: vec![String::from("card")], attrs: Vec::new(), kids: Vec::new(), pos: 0, of: 1 };
     let mut stack: Vec<El> = vec![root()];
     let b = html.as_bytes();
     let mut i = 0;
@@ -82,18 +141,15 @@ fn parse(html: &str) -> El {
                 }
                 continue;
             }
-            let mut attrs = Vec::new();
-            for k in KEPT_ATTRS {
-                if let Some(v) = attr(tag, k) {
-                    attrs.push((String::from(k), v));
-                }
-            }
+            let attrs = parse_attrs(tag);
             let el = El {
                 tag: name.clone(),
                 id: attr(tag, "id").unwrap_or_default(),
                 classes: attr(tag, "class").unwrap_or_default().split_whitespace().map(String::from).collect(),
                 attrs,
                 kids: Vec::new(),
+                pos: 0,
+                of: 1,
             };
             if VOID.contains(&name.as_str()) || tag.ends_with('/') {
                 stack.last_mut().unwrap().kids.push(Node::El(Box::new(el)));
@@ -130,14 +186,22 @@ fn parse(html: &str) -> El {
     while stack.len() > 1 {
         close_top(&mut stack);
     }
-    stack.pop().unwrap()
+    let mut root = stack.pop().unwrap();
+    number(&mut root);
+    root
 }
 
 // ---------------------------------------------------------------- the CSS
+/// One compound of a selector: tag, id, classes, attribute tests and the structural
+/// pseudo-classes; `child` when it must be the parent of the compound after it (`>`).
 struct Compound {
     tag: String,
     id: String,
     classes: Vec<String>,
+    attrs: Vec<(String, char, String)>, // name, test ('*' present, '=' '~' '^' '$' '|' 'c' contains), value
+    nth: Vec<(bool, i32, i32)>,         // (from the end, a, b): an+b, 1-based
+    not: Vec<Compound>,
+    child: bool,
 }
 struct Rule {
     chain: Vec<Compound>, // ancestors first, the element last
@@ -151,6 +215,130 @@ fn decls(body: &str) -> Vec<(String, String)> {
         Some((k.trim().to_ascii_lowercase(), String::from(v.trim().trim_end_matches("!important").trim())))
     }).collect()
 }
+/// "odd", "even", "3", "2n+1", "-n+3" as (a, b).
+fn nth_formula(f: &str) -> Option<(i32, i32)> {
+    let f: String = f.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    match f.as_str() {
+        "odd" => return Some((2, 1)),
+        "even" => return Some((2, 0)),
+        _ => {}
+    }
+    if let Some((a, b)) = f.split_once('n') {
+        let a = match a { "" | "+" => 1, "-" => -1, a => a.parse().ok()? };
+        let b = if b.is_empty() { 0 } else { b.parse().ok()? };
+        return Some((a, b));
+    }
+    f.parse().ok().map(|b| (0, b))
+}
+/// A compound selector, or None when it holds something not supported (:hover, ::before ...).
+fn compound(part: &str) -> Option<(Compound, u32)> {
+    let mut c = Compound { tag: String::new(), id: String::new(), classes: Vec::new(), attrs: Vec::new(), nth: Vec::new(), not: Vec::new(), child: false };
+    let mut spec = 0;
+    let p: Vec<char> = part.chars().collect();
+    let mut i = 0;
+    let word = |i: &mut usize| -> String {
+        let s = *i;
+        while *i < p.len() && (p[*i].is_alphanumeric() || p[*i] == '-' || p[*i] == '_' || p[*i] == '*') {
+            *i += 1;
+        }
+        p[s..*i].iter().collect()
+    };
+    let t = word(&mut i);
+    if !t.is_empty() && t != "*" {
+        c.tag = t.to_ascii_lowercase();
+        spec += 1;
+    }
+    while i < p.len() {
+        match p[i] {
+            '.' => { i += 1; c.classes.push(word(&mut i)); spec += 10; }
+            '#' => { i += 1; c.id = word(&mut i); spec += 100; }
+            '[' => {
+                let end = p[i..].iter().position(|&x| x == ']')? + i;
+                let inner: String = p[i + 1..end].iter().collect();
+                let (name, test, value) = match inner.find('=') {
+                    Some(e) => {
+                        let (op, name) = match inner[..e].chars().last() {
+                            Some(o @ ('~' | '^' | '$' | '|' | '*')) => (if o == '*' { 'c' } else { o }, &inner[..e - 1]),
+                            _ => ('=', &inner[..e]),
+                        };
+                        (name.trim().to_ascii_lowercase(), op, String::from(inner[e + 1..].trim().trim_matches(['"', '\''])))
+                    }
+                    None => (inner.trim().to_ascii_lowercase(), '*', String::new()),
+                };
+                c.attrs.push((name, test, value));
+                spec += 10;
+                i = end + 1;
+            }
+            ':' => {
+                if p.get(i + 1) == Some(&':') {
+                    return None; // pseudo-elements draw nothing here
+                }
+                i += 1;
+                let name = word(&mut i).to_ascii_lowercase();
+                let mut arg = String::new();
+                if p.get(i) == Some(&'(') {
+                    let mut depth = 0;
+                    let s = i + 1;
+                    while i < p.len() {
+                        if p[i] == '(' { depth += 1; }
+                        if p[i] == ')' { depth -= 1; if depth == 0 { break; } }
+                        i += 1;
+                    }
+                    arg = p[s..i.min(p.len())].iter().collect();
+                    i += 1;
+                }
+                spec += 10;
+                match name.as_str() {
+                    "first-child" => c.nth.push((false, 0, 1)),
+                    "last-child" => c.nth.push((true, 0, 1)),
+                    "only-child" => { c.nth.push((false, 0, 1)); c.nth.push((true, 0, 1)); }
+                    "nth-child" => { let (a, b) = nth_formula(&arg)?; c.nth.push((false, a, b)); }
+                    "nth-last-child" => { let (a, b) = nth_formula(&arg)?; c.nth.push((true, a, b)); }
+                    "first-of-type" | "last-of-type" => return None,
+                    "not" => { let (n, _) = compound(arg.trim())?; c.not.push(n); }
+                    "root" => c.tag = String::from("body"),
+                    _ => return None, // :hover, :focus, :checked ... never true on a card
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((c, spec))
+}
+/// The width a card's CSS sees, in CSS px (for @media).
+static mut CSS_WIDTH: f32 = 300.0;
+/// Whether an @media query holds on the panel: screen, portrait, light, at the card's width.
+fn media_matches(q: &str) -> bool {
+    let q = q.to_ascii_lowercase();
+    let w = unsafe { CSS_WIDTH };
+    q.split(',').any(|alt| {
+        let alt = alt.trim();
+        if alt.starts_with("print") || alt.starts_with("not ") || alt.contains("only print") {
+            return false;
+        }
+        let mut ok = true;
+        let mut rest = alt;
+        while let Some(open) = rest.find('(') {
+            let close = rest[open..].find(')').map(|c| open + c).unwrap_or(rest.len());
+            let feat = &rest[open + 1..close];
+            if let Some((k, v)) = feat.split_once(':') {
+                let px = length(v.trim(), 16.0, w).unwrap_or(0.0);
+                ok &= match k.trim() {
+                    "max-width" => w <= px,
+                    "min-width" => w >= px,
+                    "orientation" => v.trim() == "portrait",
+                    "prefers-color-scheme" => v.trim() == "light",
+                    "hover" => v.trim() == "none",
+                    "pointer" => v.trim() != "fine",
+                    _ => true,
+                };
+            }
+            rest = &rest[close.min(rest.len())..];
+            if rest.starts_with(')') { rest = &rest[1..]; }
+        }
+        ok
+    })
+}
 fn parse_css(css: &str) -> Vec<Rule> {
     let mut src = String::new();
     let mut rest = css;
@@ -161,22 +349,28 @@ fn parse_css(css: &str) -> Vec<Rule> {
     src.push_str(rest);
     let mut rules = Vec::new();
     let mut order = 0;
-    let mut s = src.as_str();
+    parse_rules(&src, &mut rules, &mut order);
+    rules.sort_by_key(|r| (r.spec, r.order));
+    rules
+}
+fn parse_rules(src: &str, rules: &mut Vec<Rule>, order: &mut u32) {
+    let mut s = src;
     while let Some(open) = s.find('{') {
         let head = s[..open].trim();
         if head.starts_with('@') {
+            // the block to its matching brace
             let mut depth = 0;
             let mut end = s.len();
             for (k, ch) in s[open..].char_indices() {
-                if ch == '{' {
-                    depth += 1;
-                }
+                if ch == '{' { depth += 1; }
                 if ch == '}' {
                     depth -= 1;
-                    if depth == 0 {
-                        end = open + k + 1;
-                        break;
-                    }
+                    if depth == 0 { end = open + k + 1; break; }
+                }
+            }
+            if let Some(q) = head.strip_prefix("@media") {
+                if media_matches(q) {
+                    parse_rules(&s[open + 1..end.saturating_sub(1).max(open + 1)], rules, order);
                 }
             }
             s = &s[end..];
@@ -186,54 +380,93 @@ fn parse_css(css: &str) -> Vec<Rule> {
         let ds = decls(&s[open + 1..close]);
         for sel in head.split(',') {
             let sel = sel.trim();
-            if sel.contains(':') || sel.contains('[') || sel.is_empty() {
+            if sel.is_empty() {
                 continue;
+            }
+            // compounds and the combinators between them
+            let mut parts: Vec<(String, bool)> = Vec::new();
+            let mut cur = String::new();
+            let mut child_next = false;
+            let mut depth = 0;
+            for ch in sel.chars() {
+                match ch {
+                    '(' | '[' => { depth += 1; cur.push(ch); }
+                    ')' | ']' => { depth -= 1; cur.push(ch); }
+                    '>' | '+' | '~' if depth == 0 => {
+                        if !cur.trim().is_empty() { parts.push((core::mem::take(&mut cur), child_next)); }
+                        // siblings are read as plain descendants of the same parent
+                        child_next = ch == '>';
+                    }
+                    c if c.is_whitespace() && depth == 0 => {
+                        if !cur.trim().is_empty() {
+                            parts.push((core::mem::take(&mut cur), child_next));
+                            child_next = false;
+                        }
+                    }
+                    _ => cur.push(ch),
+                }
+            }
+            if !cur.trim().is_empty() {
+                parts.push((cur, child_next));
             }
             let mut chain = Vec::new();
             let mut spec = 0;
-            for part in sel.split(|c: char| c.is_whitespace() || c == '>' || c == '+' || c == '~').filter(|p| !p.is_empty()) {
-                let mut c = Compound { tag: String::new(), id: String::new(), classes: Vec::new() };
-                let mut cur = String::new();
-                let mut kind = 't';
-                for ch in part.chars().chain(core::iter::once('\0')) {
-                    if ch == '.' || ch == '#' || ch == '\0' {
-                        match kind {
-                            't' if cur != "*" => c.tag = cur.to_ascii_lowercase(),
-                            '.' => c.classes.push(cur.clone()),
-                            '#' => c.id = cur.clone(),
-                            _ => {}
+            let mut ok = true;
+            for (k, (p, child)) in parts.iter().enumerate() {
+                match compound(p.trim()) {
+                    Some((mut c, sp)) => {
+                        // `child` is stored on the compound before the `>`
+                        if k > 0 && *child {
+                            if let Some(prev) = chain.last_mut() { let prev: &mut Compound = prev; prev.child = true; }
                         }
-                        cur.clear();
-                        kind = ch;
-                    } else {
-                        cur.push(ch);
+                        c.child = false;
+                        spec += sp;
+                        chain.push(c);
                     }
+                    None => { ok = false; break; }
                 }
-                spec += if c.id.is_empty() { 0 } else { 100 } + 10 * c.classes.len() as u32 + if c.tag.is_empty() { 0 } else { 1 };
-                chain.push(c);
             }
-            if !chain.is_empty() {
-                rules.push(Rule { chain, spec, order, decls: ds.clone() });
-                order += 1;
+            if ok && !chain.is_empty() {
+                rules.push(Rule { chain, spec, order: *order, decls: ds.clone() });
+                *order += 1;
             }
         }
         s = &s[close + 1..];
     }
-    rules.sort_by_key(|r| (r.spec, r.order));
-    rules
 }
 fn matches(c: &Compound, e: &El) -> bool {
     (c.tag.is_empty() || c.tag == e.tag || (c.tag == "html" && e.tag == "body"))
         && (c.id.is_empty() || c.id == e.id)
         && c.classes.iter().all(|k| e.classes.contains(k))
+        && c.attrs.iter().all(|(name, test, value)| {
+            let Some(v) = e.attr(name) else { return false };
+            match test {
+                '*' => true,
+                '=' => v == value,
+                '~' => v.split_whitespace().any(|w| w == value),
+                '^' => v.starts_with(value.as_str()),
+                '$' => v.ends_with(value.as_str()),
+                '|' => v == value || v.starts_with(&format!("{}-", value)),
+                _ => v.contains(value.as_str()),
+            }
+        })
+        && c.nth.iter().all(|&(from_end, a, b)| {
+            let n = if from_end { (e.of - e.pos) as i32 } else { e.pos as i32 + 1 };
+            if a == 0 { n == b } else { (n - b) % a == 0 && (n - b) / a >= 0 }
+        })
+        && c.not.iter().all(|n| !matches(n, e))
 }
 fn rule_applies(r: &Rule, e: &El, ancestors: &[&El]) -> bool {
     let (last, before) = r.chain.split_last().unwrap();
     if !matches(last, e) {
         return false;
     }
+    // walk the ancestors right to left; a compound marked `child` must be the direct parent
     let mut at = ancestors.len();
-    for c in before.iter().rev() {
+    for k in (0..before.len()).rev() {
+        let c = &before[k];
+        // c.child: c must be the direct parent of what came right after it
+        let must_be_parent = c.child;
         loop {
             if at == 0 {
                 return false;
@@ -241,6 +474,9 @@ fn rule_applies(r: &Rule, e: &El, ancestors: &[&El]) -> bool {
             at -= 1;
             if matches(c, ancestors[at]) {
                 break;
+            }
+            if must_be_parent {
+                return false;
             }
         }
     }
@@ -342,6 +578,9 @@ struct BoxLook {
     height: Option<f32>,
     max_width: Option<f32>,
     text_indent: f32,
+    flex: bool,           // display: flex — children side by side
+    column: bool,         // flex-direction: column — they stack after all
+    float: Option<bool>,  // float: Some(false) left, Some(true) right
 }
 fn family_sans(v: &str) -> Option<bool> {
     let v = v.to_ascii_lowercase();
@@ -414,11 +653,17 @@ fn apply(look: &mut Look, bx: &mut BoxLook, decls: &[(String, String)], parent: 
             "white-space" => look.pre = vl.starts_with("pre"),
             "display" => match vl.as_str() {
                 "none" => bx.hidden = true,
-                "block" | "flex" | "grid" | "list-item" | "table" => bx.block = Some(true),
-                "inline" | "inline-block" | "inline-flex" => bx.block = Some(false),
+                "flex" | "inline-flex" => {
+                    bx.block = Some(true);
+                    bx.flex = true;
+                }
+                "block" | "grid" | "list-item" | "table" => bx.block = Some(true),
+                "inline" | "inline-block" => bx.block = Some(false),
                 _ => {}
             },
             "visibility" => bx.hidden = vl == "hidden",
+            "flex-direction" | "flex-flow" => bx.column = vl.starts_with("column"),
+            "float" => bx.float = match vl.as_str() { "left" => Some(false), "right" => Some(true), _ => None },
             "margin-top" => bx.margin_top = length(v, em, width).unwrap_or(0.0),
             "margin-bottom" => bx.margin_bottom = length(v, em, width).unwrap_or(0.0),
             "padding-top" => bx.margin_top += length(v, em, width).unwrap_or(0.0),
@@ -495,7 +740,7 @@ pub enum Item {
         bars: Vec<i32>,
     },
     Rule { x: i32, w: i32 },
-    Image { canvas: Canvas, x: i32, avail: i32, centre: bool },
+    Image { canvas: Canvas, x: i32, avail: i32, centre: bool, right: bool },
     Gap { h: i32, band: Option<(i32, i32)>, bars: Vec<i32> },
     Row { cells: Vec<(i32, i32, Vec<Item>)>, height: i32 },
 }
@@ -677,6 +922,26 @@ impl Builder<'_> {
                 let add = if extra > 0 { extra * seen_space / spaces - extra * (seen_space - 1) / spaces } else { 0 };
                 if r.look.mark {
                     marks.push((x, ruby_h + lead, tw + add, natural));
+                }
+                // underline and strike-through run on across the space between two words
+                let between = (r.look.underline || r.look.strike) && k > 0 && k + 1 < runs.len()
+                    && runs[k - 1].look.underline == r.look.underline && runs[k + 1].look.underline == r.look.underline
+                    && runs[k - 1].look.strike == r.look.strike && runs[k + 1].look.strike == r.look.strike;
+                if between {
+                    let asc = gfx::ascent(r.style);
+                    let mut cv = Canvas::new(tw + add + 4, r.style.line_h + 8);
+                    for xx in 0..tw + add {
+                        if r.look.underline {
+                            cv.set(xx, 4 + asc + 3);
+                            if r.style.line_h > 40 {
+                                cv.set(xx, 4 + asc + 4);
+                            }
+                        }
+                        if r.look.strike {
+                            cv.set(xx, 4 + asc * 2 / 3);
+                        }
+                    }
+                    pieces.push(Piece { x, y: base - asc - 4, canvas: cv, color: r.look.color });
                 }
                 x += tw + add;
                 continue;
@@ -917,8 +1182,11 @@ impl Builder<'_> {
                     self.runs.push(Run { text: String::new(), look, style: style_of(&look), space: false, ruby: None, image: Some(c), marker: false });
                 } else {
                     self.flush();
-                    let (x, avail, centre) = (self.left, self.avail(), look.align != Align::Left);
-                    self.push_item(Item::Image { canvas: c, x, avail, centre });
+                    // floated: to its side (text does not flow around it on this narrow card)
+                    let (x, avail) = (self.left, self.avail());
+                    let right = bx.float == Some(true) || (bx.float.is_none() && look.align == Align::Right);
+                    let centre = bx.float.is_none() && look.align == Align::Center;
+                    self.push_item(Item::Image { canvas: c, x, avail, centre, right });
                 }
                 return;
             }
@@ -938,6 +1206,18 @@ impl Builder<'_> {
                 return;
             }
             _ => {}
+        }
+        if block && bx.flex && !bx.column {
+            self.flush();
+            self.gap((bx.margin_top * PX) as i32);
+            let saved = (self.align, self.left, self.right);
+            self.left += (bx.indent_left * PX) as i32;
+            self.right += (bx.indent_right * PX) as i32;
+            self.align = look.align;
+            self.flex_row(e, look, ancestors);
+            (self.align, self.left, self.right) = saved;
+            self.gap((bx.margin_bottom * PX) as i32);
+            return;
         }
         let saved = (self.left, self.right, self.align, self.band, self.bars.len());
         if block {
@@ -1007,19 +1287,34 @@ impl Builder<'_> {
     fn table(&mut self, t: &El, look: Look, ancestors: &mut Vec<*const El>) {
         let mut rows: Vec<&El> = Vec::new();
         collect_rows(t, &mut rows);
-        let cols = rows.iter().map(|r| cells(r).len()).max().unwrap_or(0);
+        let ruled = t.attr("border").is_some_and(|b| b != "0")
+            || self.rules.iter().any(|r| r.chain.last().is_some_and(|c| matches!(c.tag.as_str(), "td" | "th" | "table"))
+                && r.decls.iter().any(|d| d.0.starts_with("border") && !d.1.starts_with("none")));
+        let grid: Vec<Vec<&El>> = rows.iter().map(|r| cells(r)).collect();
+        self.grid(grid, look, ancestors, ruled);
+    }
+    /// A flex row: its children side by side, as one row of a table without rules.
+    fn flex_row(&mut self, e: &El, look: Look, ancestors: &mut Vec<*const El>) {
+        let kids: Vec<&El> = e.kids.iter().filter_map(|k| match k { Node::El(c) => Some(&**c), _ => None }).collect();
+        if kids.is_empty() {
+            return;
+        }
+        ancestors.push(e as *const El);
+        self.grid(vec![kids], look, ancestors, false);
+        ancestors.pop();
+    }
+    /// Rows of cells: columns sized to their content, each cell laid out on its own.
+    fn grid(&mut self, rows: Vec<Vec<&El>>, look: Look, ancestors: &mut Vec<*const El>, ruled: bool) {
+        let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         if cols == 0 {
             return;
         }
         let avail = self.avail();
-        let ruled = t.attr("border").is_some_and(|b| b != "0")
-            || self.rules.iter().any(|r| r.chain.last().is_some_and(|c| matches!(c.tag.as_str(), "td" | "th" | "table"))
-                && r.decls.iter().any(|d| d.0.starts_with("border") && !d.1.starts_with("none")));
         let st = style_of(&look);
         let mut min_w = vec![0i32; cols];
         let mut max_w = vec![0i32; cols];
         for r in &rows {
-            for (c, cell) in cells(r).iter().enumerate() {
+            for (c, cell) in r.iter().enumerate() {
                 let text = plain_text(cell);
                 let longest = text.split_whitespace().map(|w| gfx::text_width(st, w)).max().unwrap_or(0);
                 min_w[c] = min_w[c].max(longest.min(avail / cols as i32));
@@ -1046,7 +1341,7 @@ impl Builder<'_> {
             let mut x = x0;
             let mut out = Vec::new();
             let mut height = 0;
-            for (c, cell) in cells(r).iter().enumerate().take(cols) {
+            for (c, cell) in r.iter().enumerate().take(cols) {
                 let w = widths[c];
                 let mut sub = Builder { rules: self.rules, items: Vec::new(), runs: Vec::new(), left: 0, right: 0, width: w,
                                         align: if cell.tag == "th" { Align::Center } else { Align::Left }, band: false,
@@ -1201,12 +1496,20 @@ fn scale_down(c: &Canvas, w: i32) -> Canvas {
     out
 }
 
+/// A language code as the hyphenation patterns name it (they are static); English when unknown.
+pub fn lang_static(code: &str) -> &'static str {
+    const KNOWN: [&str; 11] = ["de", "en", "es", "fi", "fr", "it", "pl", "pt", "ru", "sv", "uk"];
+    KNOWN.iter().find(|k| **k == code).copied().unwrap_or("en")
+}
+
 // ---------------------------------------------------------------- pages
 /// A card side's pages for a body `width` x `height`. `css` is the note type's.
-pub fn layout(html: &str, css: &str, width: i32, height: i32) -> Vec<Vec<Item>> {
+/// `deck_lang` is the deck's language, for a card too short to tell its own.
+pub fn layout(html: &str, css: &str, width: i32, height: i32, deck_lang: &str) -> Vec<Vec<Item>> {
     let root = parse(html);
+    unsafe { CSS_WIDTH = width as f32 / PX };
     let rules = parse_css(css);
-    let lang = crate::hyph::guess_lang(&plain_text(&root));
+    let lang = crate::hyph::guess_lang_sure(&plain_text(&root)).unwrap_or_else(|| lang_static(deck_lang));
     let mut b = Builder { rules: &rules, items: Vec::new(), runs: Vec::new(), left: 0, right: 0, width,
                           align: Align::Center, band: false, first_indent: 0, lang, pending_gap: 0, bars: Vec::new() };
     // Anki's default card: 20 px, centred, black.
@@ -1267,8 +1570,8 @@ fn draw_item(it: &Item, x: i32, y: i32) {
             }
         }
         Item::Rule { x: rx, w } => dsn::fill(x + rx, y + 10, *w, 1, dsn::BLACK),
-        Item::Image { canvas, x: ix, avail, centre } => {
-            let ox = x + ix + if *centre { (avail - canvas.w) / 2 } else { 0 };
+        Item::Image { canvas, x: ix, avail, centre, right } => {
+            let ox = x + ix + if *centre { (avail - canvas.w) / 2 } else if *right { avail - canvas.w } else { 0 };
             gfx::blit(canvas, ox, y + 6, dsn::BLACK);
         }
         Item::Gap { h, band, bars } => {

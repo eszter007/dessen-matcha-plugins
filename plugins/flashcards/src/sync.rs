@@ -240,6 +240,7 @@ fn sync_deck(client: &mut Client, svc: &Service, name: &str, key: &str, server_i
         records.push(CardRecord { id: *id, note, flags: 0 });
     }
     sides.retain(|s| ids.contains(&s.0));
+    info.lang = deck_language(name, &sides);
     if !store::write_sides(key, &sides) || !store::write_ids(key, &records) {
         return Err(Error { kind: Kind::Reply, kind_name: String::new(), message: tr("sd_failed") });
     }
@@ -302,6 +303,34 @@ fn base64(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// A deck's language, for hyphenating cards too short to tell: from the name of a deck of mined
+/// words (Matcha::Deutsch), else from the text of up to 80 of its cards.
+fn deck_language(name: &str, sides: &[(u64, String, String)]) -> String {
+    const AUTONYMS: [(&str, &str); 13] = [("日本語", "ja"), ("中文", "zh"), ("English", "en"), ("Deutsch", "de"), ("Français", "fr"),
+        ("Español", "es"), ("Italiano", "it"), ("Português", "pt"), ("Nederlands", "nl"), ("Magyar", "hu"), ("Polski", "pl"),
+        ("Русский", "ru"), ("Українська", "uk")];
+    if let Some(l) = name.strip_prefix("Matcha::").and_then(|n| AUTONYMS.iter().find(|a| a.0 == n)) {
+        return String::from(l.1);
+    }
+    let mut text = String::new();
+    for (_, f, b) in sides.iter().take(80) {
+        for side in [f, b] {
+            let mut in_tag = false;
+            for c in side.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => { in_tag = false; text.push(' '); }
+                    '\u{1e}' | '\u{1f}' => text.push(' '),
+                    _ if !in_tag => text.push(c),
+                    _ => {}
+                }
+            }
+            text.push(' ');
+        }
+    }
+    String::from(crate::hyph::guess_lang_sure(&text).unwrap_or(""))
 }
 
 /// Cards that arrive already studied in Anki (a deck synced for the first time, or a mined word a

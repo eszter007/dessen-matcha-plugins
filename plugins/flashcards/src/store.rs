@@ -102,6 +102,7 @@ pub struct DeckInfo {
     pub new_random: bool,
     pub last_review_id: u64,
     pub preset: bool, // its Anki preset was read; else the plugin's settings schedule it
+    pub lang: String, // its cards' language, for hyphenation ("de", "en", ...; empty: unknown)
 }
 
 fn num(v: &Value, k: &str, d: f64) -> f64 { v.get(k).and_then(|x| x.as_f64()).unwrap_or(d) }
@@ -118,7 +119,7 @@ impl DeckInfo {
             new_per_day: 20, reviews_per_day: 9999, retention: 0.9, max_interval: 36500, learn_steps: vec![10],
             relearn_steps: vec![10], bury_new: false, bury_reviews: false, easy_days: [100; 7], leech_threshold: 0,
             leech_suspend: true, review_order: String::from("day"), new_mix: String::from("mixed"), new_random: false,
-            last_review_id: 0, preset: false,
+            last_review_id: 0, preset: false, lang: String::new(),
         }
     }
     pub fn read(key: &str) -> Option<DeckInfo> {
@@ -128,6 +129,7 @@ impl DeckInfo {
         d.apply_preset(&v);
         d.last_review_id = text(&v, "lastReviewId").parse().unwrap_or(0);
         d.preset = v.get("preset").and_then(|x| x.as_bool()).unwrap_or(false);
+        d.lang = text(&v, "lang");
         if !d.preset {
             // As matcha's schedulingParams: the user's settings where no preset was read.
             let st = Settings::read();
@@ -170,7 +172,7 @@ impl DeckInfo {
             "easyDaysPercentages": self.easy_days, "leechThreshold": self.leech_threshold,
             "leechAction": if self.leech_suspend { "suspend" } else { "tagOnly" }, "reviewOrder": self.review_order,
             "newMix": self.new_mix, "newSortOrder": if self.new_random { "randomCard" } else { "template" },
-            "lastReviewId": format!("{}", self.last_review_id), "preset": self.preset,
+            "lastReviewId": format!("{}", self.last_review_id), "preset": self.preset, "lang": self.lang,
         });
         write_json(&format!("{}.json", self.key), &v)
     }
@@ -806,6 +808,8 @@ impl Session {
     pub fn reviewed(&self) -> usize { self.reviewed }
     /// Whether the deck comes from the Migaku bridge rather than Anki.
     pub fn is_migaku(&self) -> bool { self.info.as_ref().is_some_and(|i| i.migaku) }
+    /// The deck's language as the sync found it (empty when unknown).
+    pub fn lang(&self) -> &str { self.info.as_ref().map(|i| i.lang.as_str()).unwrap_or("") }
     pub fn total(&self) -> usize { self.queue.len() + self.learning.len() }
     pub fn rating_count(&self, i: usize) -> u16 { self.rating_counts[i] }
 

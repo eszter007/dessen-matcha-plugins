@@ -371,13 +371,15 @@ pub fn break_offsets(word: &str, lang: &str) -> Vec<(usize, bool)> {
 /// Guess the language of `text` from its characters. This is only a cheap
 /// heuristic (no dictionary, no statistics): distinctive letters pick a
 /// language with a trie, everything else falls back to "en".
-pub fn guess_lang(text: &str) -> &'static str {
+/// The language when the text tells it (letters only one language uses, or two of its common
+/// words); None for a short text that could be anything.
+pub fn guess_lang_sure(text: &str) -> Option<&'static str> {
     let has = |set: &str| text.chars().any(|c| set.contains(c));
     let cyr = text.chars().any(|c| is_cyrillic(c as u32));
     if cyr {
-        return if has("іїєґІЇЄҐ") { "uk" } else { "ru" };
+        return Some(if has("іїєґІЇЄҐ") { "uk" } else { "ru" });
     }
-    if has("ąęłńśźżĄĘŁŃŚŹŻ") { return "pl"; }
+    if has("ąęłńśźżĄĘŁŃŚŹŻ") { return Some("pl"); }
     // Common short words decide most card sentences, before the letters do.
     const WORDS: [(&str, &[&str]); 8] = [
         ("de", &["der", "die", "das", "und", "ist", "nicht", "ich", "ein", "eine", "von", "mit", "zu", "auf", "sie", "es"]),
@@ -400,22 +402,22 @@ pub fn guess_lang(text: &str) -> &'static str {
         }
     }
     if best.1 >= 2 {
-        return best.0;
+        return Some(best.0);
     }
-    if has("ßẞ") { return "de"; }
-    if has("ñÑ¿¡") { return "es"; }
-    if has("ãõÃÕ") { return "pt"; }
-    if has("åÅ") { return if has("üÜ") { "de" } else { "sv" }; }
-    if has("üÜ") { return "de"; }
+    if has("ßẞ") { return Some("de"); }
+    if has("ñÑ¿¡") { return Some("es"); }
+    if has("ãõÃÕ") { return Some("pt"); }
+    if has("åÅ") { return Some(if has("üÜ") { "de" } else { "sv" }); }
+    if has("üÜ") { return Some("de"); }
     if has("äöÄÖ") {
         // Finnish doubles vowels and uses ä/ö heavily; Swedish/German share ä/ö.
         let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
-        if ["ää", "öö", "aa", "ii", "uu", "yy"].iter().any(|p| lower.contains(p)) { return "fi"; }
-        return "de";
+        if ["ää", "öö", "aa", "ii", "uu", "yy"].iter().any(|p| lower.contains(p)) { return Some("fi"); }
+        return Some("de");
     }
-    if has("çœæÇŒÆëËîÎêÊâÂ") { return "fr"; }
-    if has("ìòÌÒ") { return "it"; }
-    if has("àèùÀÈÙ") { return "fr"; }
-    if has("áéíóúÁÉÍÓÚ") { return "es"; }
-    "en"
+    if has("çœæÇŒÆëËîÎêÊâÂ") { return Some("fr"); }
+    if has("ìòÌÒ") { return Some("it"); }
+    if has("àèùÀÈÙ") { return Some("fr"); }
+    if has("áéíóúÁÉÍÓÚ") { return Some("es"); }
+    None
 }

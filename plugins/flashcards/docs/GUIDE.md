@@ -129,7 +129,10 @@ What the renderer handles:
 - **Text:** colour as black, or grey for light colours; highlights (`background`, `<mark>`);
   underline, strike-through, sub- and superscript; `line-height`; `text-transform`; justified
   text; hyphenation of Latin and Cyrillic words at their syllables in left-aligned and justified
-  text (patterns for de, en, es, fi, fr, it, pl, pt, ru, sv, uk; the language is guessed).
+  text (patterns for de, en, es, fi, fr, it, pl, pt, ru, sv, uk). The language comes from the
+  card's own text when it tells (letters or common words); a card too short to tell uses its
+  deck's language, guessed at sync from up to 80 of its cards (a `Matcha::<language>` deck from
+  its name, a local deck of mined words from its file).
 - **Blocks:** margins and padding, borders as rules (a left border as a bar, as in blockquotes),
   background bands, `text-align`, numbered and nested lists, tables with columns sized to their
   content, `<hr>`, `<br>`, `display: none`.
@@ -142,9 +145,20 @@ What the renderer handles:
   Bold at 36 pt when bold.
 - **Old decks:** `<font color size face>`, `align=`, `<center>`.
 
-CSS is read as a subset: tag, `.class` and `#id` selectors with descendants (child selectors
-count as descendants), the properties above, and px, pt, em, rem and %. Pseudo-classes
-(`:hover`, `:first-child`), attribute selectors, `@media` rules and night mode are left out.
+<p>
+<img src="img/anki-css-1.png" width="200" alt="Flex row, nth-child stripes, :not, attribute and child selectors, @media">
+<img src="img/anki-css-2.png" width="200" alt="A floated picture">
+</p>
+
+CSS selectors: tag, `.class`, `#id`, attribute tests (`[lang]`, `[lang=ja]`, `~=`, `^=`, `$=`,
+`*=`, `|=`), descendant and child (`>`) combinators, `:first-child`, `:last-child`,
+`:only-child`, `:nth-child()`, `:nth-last-child()`, `:not()` and `:root`, with CSS specificity.
+`@media` rules apply as on a portrait screen in light mode at the card's width, so
+`(max-width: …)` and `(orientation: portrait)` work and `print` or dark-mode rules do not.
+Night mode classes never apply. `display: flex` lays a row's children side by side (column flex
+stacks them); a floated picture goes to its side, with the text below it. Interaction states
+(`:hover`, `:focus`), pseudo-elements (`::before`) and sibling combinators (`+`, `~`, read as
+descendants) are left out.
 
 ## Words mined in matcha: the spine card
 
@@ -250,8 +264,10 @@ The plugin follows CrossPoint's language (Settings → Language), in all 37 of m
 languages, with matcha's plural rules. Arabic, Hebrew and Persian mirror the layout: titles and
 labels on the right, Again on the right of the rating boxes.
 
-The translations of the plugin's own words were machine-made and are not yet checked by native
-speakers; corrections to `i18n/<language>.json` are welcome.
+Where Anki has the same term, the plugin uses Anki's own translation: the ratings (Again, Hard,
+Good, Easy), Desired Retention, New cards/day, Maximum interval and the short time units under
+the rating boxes. The rest of the plugin's words were machine-made and are not yet checked by
+native speakers; corrections to `i18n/<language>.json` are welcome.
 
 ## Files on the SD card
 
