@@ -11,3 +11,8 @@ A book counts as finished when you leave it past its last page.
 Open it every dozen reading sessions or so: sessions wait in a small queue
 (4 KB) that the firmware drops if it overflows. Needs the clock set and a
 CrossPoint build with Dessen app-event handlers (feat/dessen-apps, 20 Nov 2026 or later).
+
+Insights and Flashcards share matcha's tab bar at the bottom of the main page:
+Home, Library, Transfer, Insights, Flashcards (when installed) and Settings.
+Tap a tab, or press Down past the last book row to move into the bar, Up/Down
+to pick a tab and Confirm to switch.
