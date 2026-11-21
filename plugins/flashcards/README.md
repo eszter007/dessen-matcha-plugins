@@ -13,3 +13,8 @@ Setup: put a config.json in this folder:
   {"server": "http://192.168.1.2:8080", "key": "your server key",
    "anki": ["Kaishi 1.5k"], "migaku": ["日本語"]}
 then open Flashcards and choose Sync Flashcards.
+
+Insights and Flashcards share matcha's tab bar at the bottom: Home, Library,
+Transfer, Insights, Flashcards and Settings. Tap a tab, or press Down past the
+last row to move into the bar, Up/Down to pick a tab and Confirm to switch.
+Home closes the plugin (dessen has no call to open Home itself).

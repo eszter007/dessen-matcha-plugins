@@ -93,3 +93,10 @@ pub fn net_request(head: &str, body: &[u8], resp: &mut [u8]) -> i32 {
 }
 pub fn battery() -> i32 { dsn_battery() }
 pub fn wifi_connect() -> i32 { dsn_wifi_connect() }
+pub const HOME_LIBRARY: i32 = 1;
+pub const HOME_TRANSFER: i32 = 4;
+pub const HOME_SETTINGS: i32 = 5;
+/// Opens a firmware screen and ends the app (returns only if it could not).
+pub fn open_home(dest: i32) { dsn_open_home(dest); }
+/// Opens another dessen app in this one's place (returns only if it could not).
+pub fn open_app(path: &str) { dsn_open_app(path.as_bytes()); }

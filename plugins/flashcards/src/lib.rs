@@ -10,6 +10,8 @@ mod png;
 mod rpc;
 mod store;
 mod sync;
+mod tabbar;
+mod tabicons;
 mod ui;
 
 use core::alloc::{GlobalAlloc, Layout};

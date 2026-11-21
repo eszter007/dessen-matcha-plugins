@@ -3,6 +3,7 @@
 //! seal, and the sync's status lines.
 use crate::gfx::{self, Canvas, SMALL, UI10, UI10B, UI12, UI12B, CARD, CARDB, HERO_NUM, SERIF18B};
 use crate::store::{self, DeckSummary, Interval, Session};
+use crate::tabbar::{self, Bar, Tab};
 use crate::{dsn, fsrs, icons, sync};
 use alloc::{format, string::String, vec::Vec};
 
@@ -75,6 +76,8 @@ struct DeckList {
     hint: Option<&'static str>,
     selected: i32,
     top_row: i32,
+    bar: Bar,
+    band: Option<usize>, // the cursor's slot while it is in the tab bar
     row_ys: Vec<(i32, i32)>, // (row index, y) as drawn, for taps
 }
 
@@ -87,6 +90,8 @@ impl DeckList {
             hint: services.err(),
             selected: 0,
             top_row: 0,
+            bar: Bar::new(Tab::Flashcards),
+            band: None,
             row_ys: Vec::new(),
         }
     }
@@ -103,6 +108,8 @@ impl DeckList {
         self.row_ys.clear();
         let left = SIDE_PAD + ROW_INSET;
         let right = w - SIDE_PAD - ROW_INSET;
+        let _ = h;
+        let h = tabbar::Bar::top(); // the tab bar takes the place of the button hints
         if self.rows() == 0 {
             let mid = (content_top() + h) / 2;
             gfx::text_centered(w / 2, mid - 40, UI12B, "No decks yet", dsn::BLACK);
@@ -110,11 +117,12 @@ impl DeckList {
             for (i, l) in gfx::wrap(UI10, msg, w - 80).iter().enumerate().take(4) {
                 gfx::text_centered(w / 2, mid - 8 + i as i32 * UI10.line_h, UI10, l, dsn::BLACK);
             }
+            self.bar.draw(self.band);
             dsn::refresh();
             return;
         }
         let top = content_top();
-        let avail = safe_bottom() - top;
+        let avail = h - top;
         let block = self.hero_height() + self.rows() * ROW_PITCH;
         let hero_top = top + 10i32.max(TOP_GAP_MAX.min((avail - block) * 2 / 5));
         let due = self.due_total();
@@ -141,7 +149,7 @@ impl DeckList {
             dsn::fill(w / 2 - i, y + 5 - i, 2 * i + 1, 1, dsn::BLACK);
         }
         let list_top = hero_top + self.hero_height();
-        let bottom = safe_bottom();
+        let bottom = h;
         let fit = ((bottom - list_top) / ROW_PITCH).max(1);
         if self.selected < self.top_row {
             self.top_row = self.selected;
@@ -155,12 +163,13 @@ impl DeckList {
                 break;
             }
             self.row_ys.push((i, row_y));
+            let focused = i == self.selected && self.band.is_none();
             if self.sync_row && i == self.decks.len() as i32 {
                 // Like Insights' Refresh row: icon and small text, outlined only while focused.
                 let label = "Sync Flashcards";
                 let row_w = 24 + 8 + gfx::text_width(SMALL, label);
                 let rx = (left + right - row_w) / 2;
-                if i == self.selected {
+                if focused {
                     dsn::stroke(rx - 16, row_y + 2, row_w + 32, ROW_PITCH - 4, dsn::BLACK, 2, 12);
                 }
                 gfx::icon(rx, row_y + (ROW_PITCH - 24) / 2, 24, &icons::REFRESH_24, dsn::BLACK);
@@ -170,7 +179,7 @@ impl DeckList {
             let d = &self.decks[i as usize];
             let ty = row_y + (ROW_PITCH - UI12.line_h) / 2;
             let baseline = ty + 24;
-            if i == self.selected {
+            if focused {
                 dsn::fill_round(left - 8, row_y + 4, right - left + 16, ROW_PITCH - 8, dsn::LIGHT_GRAY, 6);
             }
             let value = format!("{}", d.due + d.fresh);
@@ -184,7 +193,7 @@ impl DeckList {
                 x += 5;
             }
         }
-        hints(["« Back", "Select", "", ""]);
+        self.bar.draw(self.band);
         dsn::refresh();
     }
 }
@@ -611,8 +620,21 @@ pub fn run() {
             list.selected = keep.min(list.rows() - 1).max(0);
             true
         };
+        let slots = list.bar.count();
         match dsn::ev_type(e) {
+            // In the tab bar: Up and Down walk it, Back and Up past the first slot leave it,
+            // Confirm switches (as matcha's Left/Right and Confirm do).
+            dsn::EV_BACK if list.band.is_some() => list.band = None,
+            dsn::EV_NEXT if list.band.is_some() => list.band = list.band.map(|f| (f + 1).min(slots - 1)),
+            dsn::EV_PREV if list.band.is_some() => list.band = list.band.and_then(|f| f.checked_sub(1)),
+            dsn::EV_CONFIRM if list.band.is_some() => {
+                if !list.bar.activate(list.band.unwrap()) {
+                    list.band = None; // Confirm on this screen's own tab hands the cursor back
+                }
+            }
             dsn::EV_BACK => return,
+            // Down past the last row moves into the tab bar, on this screen's tab.
+            dsn::EV_NEXT if rows == 0 || list.selected == rows - 1 => list.band = Some(list.bar.slot_of_current()),
             dsn::EV_NEXT | dsn::EV_SWIPE_UP if rows > 0 => list.selected = (list.selected + 1) % rows,
             dsn::EV_PREV | dsn::EV_SWIPE_DOWN if rows > 0 => list.selected = (list.selected + rows - 1) % rows,
             dsn::EV_CONFIRM => {
@@ -622,7 +644,11 @@ pub fn run() {
                 }
             }
             dsn::EV_TAP => {
-                let y = dsn::ev_y(e);
+                let (x, y) = (dsn::ev_x(e), dsn::ev_y(e));
+                if let Some(slot) = list.bar.hit(x, y) {
+                    list.bar.activate(slot);
+                    continue;
+                }
                 let hit = list.row_ys.iter().find(|(_, ry)| y >= *ry && y < ry + ROW_PITCH).map(|r| r.0);
                 let Some(i) = hit else { continue };
                 list.selected = i;

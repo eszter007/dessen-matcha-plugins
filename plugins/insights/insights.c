@@ -11,6 +11,7 @@
 // reader's own cache, /.crosspoint/epub_<std::hash(path)>/book.bin.
 #include "dessen.h"
 #include "icons.h"
+#include "tabicons.h"
 
 #define MAX_DAYS 500
 #define MAX_BOOKS 40
@@ -881,6 +882,59 @@ static void drawBookPage(int *y) {
   *y += drawCalendar(cardX, *y, cardW, -1, b);
 }
 
+// ---------------------------------------------------------------- matcha's tab bar
+// Home, Library, Transfer, Insights, Flashcards and Settings along the bottom of the main page, this
+// screen's tab filled (components/HomeTabBar.cpp). Library, Transfer and Settings open the firmware's
+// screens; Flashcards switches plugin with open_app (in this one's place). Dessen has no call for
+// Home itself: that tab closes the plugin.
+#define TAB_H 72     // the Cover Grid theme's coverGridTabBarHeight
+#define TAB_SIDE 18  // headerSidePadding: the outer icons line up with the header's corners
+enum { T_HOME, T_LIBRARY, T_TRANSFER, T_INSIGHTS, T_FLASHCARDS, T_SETTINGS };
+static int barTabs[6], nBar;
+static char flashcardsApp[48];
+static int band = -1;  // the cursor's slot while it is in the tab bar
+static int appExists(const char *p) {
+  char one[1];
+  const int n = dsn_fs_read(p, slen(p), one, 1);
+  return n == DSN_ERR_TOO_BIG || n == 1;
+}
+static void setupBar(void) {
+  nBar = 0;
+  barTabs[nBar++] = T_HOME; barTabs[nBar++] = T_LIBRARY; barTabs[nBar++] = T_TRANSFER; barTabs[nBar++] = T_INSIGHTS;
+  if (appExists("/plugins/flashcards/app.bin")) { scpy(flashcardsApp, "/plugins/flashcards/app.bin", 48); barTabs[nBar++] = T_FLASHCARDS; }
+  barTabs[nBar++] = T_SETTINGS;
+}
+static int contentBottom(void) { return page == 0 ? H - TAB_H : H; }
+static int barStep(void) { return (W - 2 * TAB_SIDE) / nBar; }
+static int insightsSlot(void) { return 3; }
+static void drawBar(void) {
+  static const unsigned char *const OUTLINE[6] = {TabHomeIcon, TabLibraryTabIcon, TabTransferTabIcon, TabStatsIcon,
+                                                  TabFlashcardsTabIcon, TabSettingsTabIcon};
+  static const unsigned char *const FILLED[6] = {TabHomeFilledIcon, TabLibraryTabFilledIcon, TabTransferTabFilledIcon,
+                                                 TabStatsFilledIcon, TabFlashcardsTabFilledIcon, TabSettingsTabFilledIcon};
+  const int top = H - TAB_H, step = barStep();
+  dsn_fill(0, top, W, TAB_H, DSN_WHITE);
+  for (int i = 0; i < nBar; i++) {
+    const int x = TAB_SIDE + i * step, t = barTabs[i];
+    if (i == band) dsn_stroke(x, top, step, TAB_H, DSN_BLACK, 4, 8, DSN_CORNERS_ALL);
+    dsn_bitmap(x + (step - 32) / 2, top + (TAB_H - 32) / 2, 32, 32, t == T_INSIGHTS ? FILLED[t] : OUTLINE[t], 128, 32, 32,
+               DSN_BITMAP_MASK, DSN_BITMAP_CENTER, DSN_BLACK, 0);
+  }
+}
+// Opens slot i's screen (ending this app); 0 when it is Insights itself.
+static int activateTab(int i) {
+  if (i < 0 || i >= nBar) return 0;
+  switch (barTabs[i]) {
+    case T_HOME: dsn_exit(0); break;
+    case T_LIBRARY: dsn_open_home(DSN_HOME_LIBRARY); break;
+    case T_TRANSFER: dsn_open_home(DSN_HOME_TRANSFER); break;
+    case T_SETTINGS: dsn_open_home(DSN_HOME_SETTINGS); break;
+    case T_FLASHCARDS: dsn_open_app(flashcardsApp, slen(flashcardsApp)); break;
+    default: return 0;
+  }
+  return 1;
+}
+
 static void draw(void) {
   dsn_clear();
   layoutHeader();
@@ -892,12 +946,13 @@ static void draw(void) {
     y += dsn_line_height(DSN_FONT_SMALL);
   }
   const int contentEnd = y + 10 + scroll;
-  pageH = H - headerBottom;
-  maxScroll = contentEnd - H;
+  pageH = contentBottom() - headerBottom;
+  maxScroll = contentEnd - contentBottom();
   if (maxScroll < 0) maxScroll = 0;
   dsn_fill(0, 0, W, headerBottom, DSN_WHITE);
   char tb[TITLE_MAX];
   drawHeader(page == 0 ? "Insights" : bookTitle(&books[openBook], tb), page == 0);
+  if (page == 0) drawBar();
   dsn_refresh();
 }
 
@@ -934,7 +989,7 @@ static void focusRow(int r) {
   bookSel = r;
   if (r < 0) return;
   const int top = rowY[r] - scroll, bottom = top + rowH;
-  if (bottom > H) setScroll(scroll + bottom - H + 10);
+  if (bottom > contentBottom()) setScroll(scroll + bottom - contentBottom() + 10);
   if (top < headerBottom) setScroll(rowY[r] - headerBottom - 8);
 }
 
@@ -965,11 +1020,20 @@ int main(void) {
   if (looked) saveDb();
   sortBooks();
   buildTabs();
+  setupBar();
   draw();
   for (;;) {
     unsigned e = dsn_wait_event();
     const int t = DSN_EV_TYPE(e);
-    const int old = scroll, oldTab = tab, oldM = calMonth, oldPage = page, oldSel = bookSel;
+    const int old = scroll, oldTab = tab, oldM = calMonth, oldPage = page, oldSel = bookSel, oldBand = band;
+    if (band >= 0) {  // in the tab bar: Up and Down walk it, Back leaves it, Confirm switches
+      if (t == DSN_EV_NEXT && band + 1 < nBar) band++;
+      else if (t == DSN_EV_PREV) band--;
+      else if (t == DSN_EV_BACK) band = -1;
+      else if (t == DSN_EV_CONFIRM && !activateTab(band)) band = -1;  // its own tab hands the cursor back
+      else if (t != DSN_EV_TAP) continue;
+      if (t != DSN_EV_TAP) { draw(); continue; }
+    }
     switch (t) {
       case DSN_EV_BACK:
         if (page == 1) closeBookPage(); else return 0;
@@ -984,8 +1048,10 @@ int main(void) {
         else if (nTabs > 1) tab = (tab + nTabs - 1) % nTabs;
         break;
       case DSN_EV_NEXT:
-        if (page == 0 && bookSel >= 0) { if (bookSel + 1 < nRows) focusRow(bookSel + 1); }
+        // Past the last book row (or the end of a page without books), Down moves into the tab bar.
+        if (page == 0 && bookSel >= 0) { if (bookSel + 1 < nRows) focusRow(bookSel + 1); else { bookSel = -1; band = insightsSlot(); } }
         else if (page == 0 && scroll >= maxScroll && nRows) focusRow(0);
+        else if (page == 0 && scroll >= maxScroll) band = insightsSlot();
         else setScroll(scroll + 40);
         break;
       case DSN_EV_PREV:
@@ -997,7 +1063,10 @@ int main(void) {
       case DSN_EV_SWIPE_DOWN: setScroll(scroll - pageH); break;
       case DSN_EV_TAP: {
         int x = DSN_EV_X(e), y = DSN_EV_Y(e);
-        if (tappedBack(x, y)) {
+        if (page == 0 && y >= H - TAB_H) {
+          if (x >= TAB_SIDE) activateTab((x - TAB_SIDE) / barStep());
+          continue;
+        } else if (tappedBack(x, y)) {
           if (page == 1) closeBookPage(); else return 0;
         } else if (tabH && y >= tabY && y < tabY + tabH) {
           for (int i = 0; i < nTabs; i++) if (tabX[i] >= 0 && x >= tabX[i] && x < tabX[i + 1]) tab = i;
@@ -1013,6 +1082,6 @@ int main(void) {
       default: continue;
     }
     if (tab != oldTab) { scroll = 0; bookSel = -1; }
-    if (scroll != old || tab != oldTab || calMonth != oldM || page != oldPage || bookSel != oldSel) draw();
+    if (scroll != old || tab != oldTab || calMonth != oldM || page != oldPage || bookSel != oldSel || band != oldBand) draw();
   }
 }
