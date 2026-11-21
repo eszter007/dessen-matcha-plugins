@@ -2,8 +2,8 @@
 // ticket torn in two -- the cover and title on one half with a 読了 stamp, the reading stats on the
 // stub -- and under it a Home button beside "Continue with" the next book in the folder.
 //
-// device.json launches the app on reader.exit; it shows the ticket only when the book was read to
-// the end and exits straight away otherwise. Opened from the plugin list, it shows the last
+// device.json opens the app on reader.end in place of the firmware's end-of-book menu. Launched on
+// an older firmware's reader.exit, it exits unless the book was read to the end. Opened from the plugin list, it shows the last
 // finished book. The numbers come from the Insights plugin's stats.db plus the sessions still
 // queued for it, so both screens agree.
 //
@@ -151,7 +151,7 @@ static const char *stampFor(const char *tag) {
 }
 
 // ---------------------------------------------------------------- the book
-static char bookPath[PATH_MAX_LEN], title[TITLE_MAX], langTag[24], langCode[8];
+static char bookPath[PATH_MAX_LEN], title[TITLE_MAX], author[TITLE_MAX], langTag[24], langCode[8];
 
 // libstdc++'s std::hash<std::string> on a 32-bit target: MurmurHash2, seed 0xc70f6907.
 static unsigned murmur2(const char *s, unsigned len) {
@@ -203,6 +203,7 @@ static void lookupBook(void) {
     off += 4;
     if (len > (unsigned)n - off) break;
     if (field == 0 && len) utf8cpy(title, buf + off, len, TITLE_MAX);
+    if (field == 1 && len) utf8cpy(author, buf + off, len, TITLE_MAX);
     if (field == 2) utf8cpy(langTag, buf + off, len, sizeof langTag);
     off += len;
   }
@@ -215,7 +216,7 @@ static void lookupBook(void) {
 // d1,d2,...<TAB>title<TAB>path" per book (older "B secs end_bp lang path" lines have no days).
 static const char *const STATS_DIRS[] = {"/plugins/stats/", "/plugins/insights/"};
 static int statsDir = -1;
-static unsigned bookSecs, bookFirst, bookFinish, bookDays, booksFinished, langFinished;
+static unsigned bookSecs, bookFirst, bookFinish, bookDays, bookSessions, booksFinished, langFinished;
 static unsigned short seenDays[64];
 static int nSeen;
 static char dbLangs[16][8];
@@ -258,13 +259,13 @@ static void loadStats(int wantLast) {
       readField(&s, dbLangs[nDbLangs++], 8, '\n');
     } else if (k == 'B') {
       unsigned secs = parseu(&s), endbp = parseu(&s), lang = parseu(&s);
-      unsigned first = 0, finish = 0, nd = 0;
+      unsigned first = 0, finish = 0, nd = 0, sessions = 0;
       int tabbed = 0;
       for (const char *e = s; *e && *e != '\n'; e++) if (*e == '\t') { tabbed = 1; break; }
       unsigned short days[24];
       int ndl = 0;
       if (tabbed) {
-        parseu(&s); first = parseu(&s); finish = parseu(&s); nd = parseu(&s);
+        sessions = parseu(&s); first = parseu(&s); finish = parseu(&s); nd = parseu(&s);
         while (*s == ' ') s++;
         while (*s >= '0' && *s <= '9') { unsigned d = parseu(&s); if (ndl < 24) days[ndl++] = (unsigned short)d; if (*s == ',') s++; }
         if (*s == '\t') s++;
@@ -281,7 +282,7 @@ static void loadStats(int wantLast) {
       }
       if (!wantLast && seq(path, bookPath)) {
         finishedHere = done;
-        bookSecs = secs; bookFirst = first; bookFinish = finish; bookDays = nd;
+        bookSecs = secs; bookFirst = first; bookFinish = finish; bookDays = nd; bookSessions = sessions;
         for (int i = 0; i < ndl; i++) if (nSeen < 64) seenDays[nSeen++] = days[i];
       }
     }
@@ -307,6 +308,7 @@ static void loadStats(int wantLast) {
       if (start && dur) {
         unsigned day = (unsigned)((int)start + tzOffset) / 86400u;
         bookSecs += dur;
+        bookSessions++;
         addDay(day);
         if (!bookFirst || day < bookFirst) bookFirst = day;
         if (endbp >= 10000 && !bookFinish) bookFinish = (unsigned)((int)(start + dur) + tzOffset) / 86400u;
@@ -456,13 +458,13 @@ static void andShifted(unsigned *d, const unsigned *s, int n, int k) {
 // u16 count, count x {u16 low, u8 w, u8 h, u16 advance (12.4), i16 left, i16 top, u32 offset},
 // then 1-bit bitmaps. The UI faces fall back to the Japanese subsets, as in matcha, then to
 // Chinese ideographs (GB2312 and Big5) the Japanese subsets lack.
-enum { F_S, F_B10, F_B12, F_J8, F_J12, F_C8, F_C12, FACES };
-static const char *const FACE_DIR[FACES] = {"s", "b10", "b12", "j8", "j12", "c8", "c12"};
-static const signed char FACE_ASC[FACES] = {16, 20, 24, 20, 29, 20, 29};
+enum { F_S, F_B10, F_B12, F_J8, F_J12, F_C8, F_C12, F_D16, FACES };
+static const char *const FACE_DIR[FACES] = {"s", "b10", "b12", "j8", "j12", "c8", "c12", "d16"};
+static const signed char FACE_ASC[FACES] = {16, 20, 24, 20, 29, 20, 29, 31};
 // Text styles: matcha's SMALL, UI_10 bold and UI_12 bold.
 typedef struct { int face, fallback, fallback2, bold, lineH; } Style;
 static const Style SMALL = {F_S, F_J8, F_C8, 0, 19}, UI10B = {F_B10, F_J8, F_C8, 1, 24},
-                   UI12B = {F_B12, F_J12, F_C12, 1, 29};
+                   UI12B = {F_B12, F_J12, F_C12, 1, 29}, DATE = {F_D16, F_J12, F_C12, 1, 37};  // d16: Ubuntu Bold 16 pt, the flight ticket's dates
 
 static unsigned char fontPool[500000];  // loaded glyph blocks, kept for the whole run
 static int fontUsed;
@@ -527,11 +529,12 @@ static unsigned utf8next(const char **s) {
   *s = (const char *)p;
   return c;
 }
+static int tracking;  // extra px between letters, for spaced-out labels
 static int textWidth(Style st, const char *s) {
   int acc = 0, extra = 0;
   while (*s) {
     Glyph g; int fb;
-    if (glyphFor(st, utf8next(&s), &g, &fb)) { acc += g.adv; extra = fb && st.bold; }
+    if (glyphFor(st, utf8next(&s), &g, &fb)) { acc += g.adv + tracking * 16; extra = fb && st.bold; }
   }
   return ((acc + 8) >> 4) + extra;
 }
@@ -560,7 +563,7 @@ static void drawText(Canvas *c, int x, int y, Style st, const char *s) {
         orBits(c, gx + part, gy + yy, g.bits, k, n);
         if (fb && st.bold) orBits(c, gx + part + 1, gy + yy, g.bits, k, n);
       }
-    acc += g.adv;
+    acc += g.adv + tracking * 16;
   }
 }
 static void drawTextAligned(Canvas *c, int x, int y, int w, Style st, const char *s, int align) {
@@ -970,7 +973,7 @@ static void drawTicket(int bottom) {
   drawStamp(imin(sx + 92, W - STAMP_SIZE / 2 - 4), sy);
 }
 
-// ---------------------------------------------------------------- buttons
+// ---------------------------------------------------------------- buttons (both tickets)
 static int selected;  // 0 = Continue (when there is a next book), the last index = Home
 static int itemCount(void) { return nextName[0] ? 2 : 1; }
 static int isHome(int i) { return i == itemCount() - 1; }
@@ -1029,12 +1032,179 @@ static void drawButtons(void) {
   iconAt(cx + cw - 10 - 32, y + (h - 32) / 2, ChevronIcon, (int)sizeof ChevronIcon, ink);
 }
 
+
+// ---------------------------------------------------------------- the flight ticket
+// The same read as a boarding pass: STARTED and FINISHED dates with a plane between them, the
+// book, five figures, then a perforated stub with a barcode patterned from the title and the
+// book's number overall and in its language. Drawn upright, straight onto the screen.
+static int themeFlight = 1;  // 0 = the torn ticket; toggled by a long press, kept in "theme"
+static const char *const MONTHS[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+
+// The plane (nose to the right, in px from its centre) turned by (c, s) in Q16 and scaled by k/16.
+static void plane(int cx, int cy, int c, int s, int k, int color) {
+  static const signed char QUADS[5][4][2] = {
+      {{-20, -2}, {16, -2}, {16, 2}, {-20, 2}},     {{16, -2}, {20, 0}, {16, 2}, {16, 2}},
+      {{3, -2}, {-6, -16}, {-10, -16}, {-4, -2}},   {{3, 2}, {-6, 16}, {-10, 16}, {-4, 2}},
+      {{-14, -2}, {-18, -8}, {-21, -8}, {-19, -2}},
+  };
+  static const signed char TAIL2[4][2] = {{-14, 2}, {-18, 8}, {-21, 8}, {-19, 2}};
+  for (int q = 0; q < 6; q++) {
+    const signed char (*p)[2] = q < 5 ? QUADS[q] : TAIL2;
+    int x[4], y[4];
+    for (int i = 0; i < 4; i++) {
+      const int px = p[i][0] * k * 4 + k * 184 / 10, py = p[i][1] * k * 4;  // x shifted to the wings' weight
+      x[i] = cx + ((px * c - py * s) >> 22);
+      y[i] = cy + ((px * s + py * c) >> 22);
+    }
+    dsn_triangle(x[0], y[0], x[1], y[1], x[2], y[2], color);
+    dsn_triangle(x[0], y[0], x[2], y[2], x[3], y[3], color);
+  }
+}
+static void dateText(unsigned day, char *date, char *year) {
+  int y, m, d;
+  civilFromDays(day, &y, &m, &d);
+  char *p = sput(date, MONTHS[(m - 1) % 12]);
+  *p++ = ' ';
+  utoa((unsigned)d, p);
+  utoa((unsigned)y, year);
+}
+// Text, barcode and dots go into one canvas the size of the pass, put on screen with one call.
+static Canvas fc;
+static void put(int x, int y, Style st, const char *s, int align, int w, int track) {
+  tracking = track;
+  const int tw = textWidth(st, s);
+  drawText(&fc, align == DSN_ALIGN_RIGHT ? x + w - tw : x, y, st, s);
+  tracking = 0;
+}
+static void box(int x, int y, int w, int h) {  // a filled rectangle, a word at a time
+  for (int r = imax(y, 0); r < imin(y + h, fc.h); r++) {
+    unsigned *row_ = row(&fc, r);
+    for (int xx = imax(x, 0); xx < imin(x + w, fc.w);) {
+      const int o = xx & 31, n = imin(32 - o, imin(x + w, fc.w) - xx);
+      row_[xx >> 5] |= (n == 32 ? ~0u : ((1u << n) - 1) << (32 - o - n));
+      xx += n;
+    }
+  }
+}
+static void dot(int cx, int cy) {  // a 6 px round dot
+  box(cx - 2, cy - 3, 4, 6);
+  box(cx - 3, cy - 2, 6, 4);
+}
+static void drawFlight(int bottom) {
+  const int cw = imin(W - 40, 440), ch = 594, pad = 26, inner = cw - 2 * pad;
+  const int cx = (W - cw) / 2, cy = imax(8, (bottom - ch) / 2);
+  const int mark = poolUsed;
+  if (!canvasNew(&fc, cw, ch)) return;
+  dsn_stroke(cx, cy, cw, ch, DSN_BLACK, 2, 18, DSN_CORNERS_ALL);
+
+  // The two dates and the plane's dotted arc between them.
+  const unsigned first = bookFirst ? bookFirst : (bookFinish ? bookFinish : today);
+  const unsigned finish = bookFinish ? bookFinish : today;
+  char d1[12], y1[8], d2[12], y2[8];
+  dateText(first, d1, y1);
+  dateText(finish, d2, y2);
+  put(pad + 36, 22 + (26 - UI12B.lineH) / 2 + 1, UI12B, "READING PASS", DSN_ALIGN_LEFT, 0, 2);
+  const int labelY = 78, dateY = labelY + SMALL.lineH + 2, yearY = dateY + DATE.lineH + 2;
+  put(pad, labelY, SMALL, "STARTED", DSN_ALIGN_LEFT, inner, 2);
+  put(pad, labelY, SMALL, "FINISHED", DSN_ALIGN_RIGHT, inner, 2);
+  put(pad, dateY, DATE, d1, DSN_ALIGN_LEFT, inner, 0);
+  put(pad, dateY, DATE, d2, DSN_ALIGN_RIGHT, inner, 0);
+  put(pad, yearY, SMALL, y1, DSN_ALIGN_LEFT, inner, 0);
+  put(pad, yearY, SMALL, y2, DSN_ALIGN_RIGHT, inner, 0);
+  const int a0 = pad + textWidth(DATE, d1) + 14, a1 = pad + inner - textWidth(DATE, d2) - 14, mid = (a0 + a1) / 2;
+  const int baseY = dateY + DATE.lineH / 2, rise = 22, half = (a1 - a0) / 2;
+  const int arc = a1 - a0 > 60;
+  if (arc)
+    for (int x = a0; x <= a1; x += 7) {  // a parabola, dotted, with a gap for the plane
+      const int t = x - mid;
+      if (iabs(t) > 24) box(x, baseY - rise + rise * t / half * t / half, 2, 2);
+    }
+  box(pad, 188, inner, 1);
+
+  // The book.
+  const int bookY = 210, coverW = 64, coverH = 96, tx = pad + coverW + 18, tw = pad + inner - tx;
+  const int blockH = SMALL.lineH + 6 + UI12B.lineH + 4 + SMALL.lineH, ty = bookY + (coverH - blockH) / 2;
+  char shown[TITLE_MAX + 8];
+  put(tx, ty, SMALL, "BOOK", DSN_ALIGN_LEFT, tw, 2);
+  truncated(UI12B, title, tw, shown, sizeof shown);
+  put(tx, ty + SMALL.lineH + 6, UI12B, shown, DSN_ALIGN_LEFT, tw, 0);
+  if (author[0]) {
+    truncated(SMALL, author, tw, shown, sizeof shown);
+    put(tx, ty + SMALL.lineH + 6 + UI12B.lineH + 4, SMALL, shown, DSN_ALIGN_LEFT, tw, 0);
+  }
+
+  // Five figures, three to a row.
+  char v[5][16];
+  const unsigned sessions = bookSessions ? bookSessions : 1;
+  fmtMinutes(bookSecs / 60, v[0]);
+  utoa(finish >= first ? finish - first + 1 : 1, v[1]);
+  utoa(bookDays ? bookDays : 1, v[2]);
+  utoa(sessions, v[3]);
+  fmtMinutes(bookSecs / 60 / sessions, v[4]);
+  static const char *const NAMES[5] = {"READING TIME", "DAYS TO FINISH", "DAYS READ", "SESSIONS", "AVG. SESSION"};
+  const int rowH = SMALL.lineH + 6 + UI12B.lineH + 22;
+  for (int i = 0; i < 5; i++) {
+    static const int COL[4] = {0, 35, 72, 100};  // % of the width: the long labels get the room
+    const int c = i % 3, x = pad + inner * COL[c] / 100, y = 336 + rowH * (i / 3);
+    const int colW = inner * (COL[c + 1] - COL[c]) / 100;
+    int track = 2;  // spaced out like the other labels, as far as the column allows
+    while (track > 0 && (tracking = track, textWidth(SMALL, NAMES[i])) > colW - 8) track--;
+    tracking = 0;
+    put(x, y, SMALL, NAMES[i], DSN_ALIGN_LEFT, colW, track);
+    put(x, y + SMALL.lineH + 6, UI12B, v[i], DSN_ALIGN_LEFT, colW, 0);
+  }
+
+  // The perforation's dots, the barcode from the title, and the book's number overall and in its language.
+  const int perfY = 485, barY = 508;
+  for (int i = 0; i < 24; i++) dot(pad + 3 + (inner - 6) * i / 23, perfY);
+  unsigned st = murmur2(title, (unsigned)slen(title)) | 1;
+  int on = 1;
+  for (int x = pad; x < pad + inner; on = !on) {
+    st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+    const int w = imin(imax(1, (int)(st & 3)), pad + inner - x);
+    if (on) box(x, barY, w, 40);
+    x += w;
+  }
+  char line[64], *p = sput(line, "BOOK NO. ");
+  utoa(booksFinished ? booksFinished : 1, p);
+  put(pad, barY + 46, SMALL, line, DSN_ALIGN_LEFT, inner, 2);
+  const char *ln = langName(langCode);
+  if (langFinished && ln) {
+    p = ordinal(langFinished, line);
+    for (char *q = line; q < p; q++) if (*q >= 'a' && *q <= 'z') *q -= 32;
+    p = sput(p, " IN ");
+    sput(p, ln);
+    put(pad, barY + 46, SMALL, line, DSN_ALIGN_RIGHT, inner, 2);
+  }
+  blit(&fc, cx, cy, DSN_BLACK);
+  poolUsed = mark;
+
+  // What the canvas can't hold: the cover, the logo, the planes and the notches.
+  const int n = dsn_book_cover(bookPath, slen(bookPath), coverH, cover, sizeof cover);
+  if (n > 4) {
+    const int bw = cover[0] | cover[1] << 8, bh = cover[2] | cover[3] << 8;
+    dsn_bitmap(cx + pad, cy + bookY, coverW, coverH, cover + 4, n - 4, bw, bh, DSN_BITMAP_BW, DSN_BITMAP_STRETCH, DSN_BLACK, 0);
+  } else {
+    dsn_fill(cx + pad, cy + bookY, coverW, coverH, DSN_BLACK);
+  }
+  dsn_stroke(cx + pad, cy + bookY, coverW, coverH, DSN_BLACK, 1, 0, 0);
+  dsn_fill_round(cx + pad, cy + 22, 26, 26, DSN_BLACK, 13, DSN_CORNERS_ALL);
+  plane(cx + pad + 13, cy + 35, 53687, -37594, 6, DSN_WHITE);  // -35°, a bit over a third of full size
+  if (arc) plane(cx + mid, cy + baseY - rise, 65536, 0, 16, DSN_BLACK);
+  for (int side = 0; side < 2; side++) {
+    const int ncx = side ? cx + cw - 1 : cx + 1;
+    dsn_fill_round(ncx - 15, cy + perfY - 15, 30, 30, DSN_WHITE, 15, DSN_CORNERS_ALL);
+    dsn_stroke(ncx - 15, cy + perfY - 15, 30, 30, DSN_BLACK, 2, 15, DSN_CORNERS_ALL);
+    dsn_fill(side ? cx + cw : cx - 17, cy + perfY - 17, 17, 34, DSN_WHITE);  // the half outside the pass
+  }
+}
+
 static void drawAll(void) {
   dsn_clear();
   buttonsX = 16;
   buttonsY = H - BUTTON_H - 10;
   buttonsW = W - 32;
-  drawTicket(buttonsY - 12);
+  if (themeFlight) drawFlight(buttonsY - 12); else drawTicket(buttonsY - 12);
   drawButtons();
   dsn_refresh();
 }
@@ -1051,7 +1221,7 @@ static void backToBook(void) {
   dsn_exit(0);
 }
 
-// The newest reader.exit this app was launched for; 0 when there is none or it was not the end.
+// The newest reader.end (or older firmware's reader.exit) this app was launched for; 0 when there is none or it was not the end.
 static int takeExitEvent(int *sawExit) {
   char p[160];
   int pl = 0;
@@ -1070,10 +1240,13 @@ static int takeExitEvent(int *sawExit) {
     while (*e && *e != '\n') e++;
     char save = *e; *e = 0;
     char v[PATH_MAX_LEN];
-    if (jstr(line, "e", v, sizeof v) && seq(v, "reader.exit") && jstr(line, "book", v, sizeof v)) {
-      scpy(bookPath, v, PATH_MAX_LEN);
-      *sawExit = 1;
-      end = jstr(line, "end_percent", v, sizeof v) && seq(v, "100");
+    if (jstr(line, "e", v, sizeof v) && (seq(v, "reader.end") || seq(v, "reader.exit"))) {
+      const int atEnd = seq(v, "reader.end");  // reader.end fires on reaching the last page
+      if (jstr(line, "book", v, sizeof v)) {
+        scpy(bookPath, v, PATH_MAX_LEN);
+        *sawExit = 1;
+        end = atEnd || (jstr(line, "end_percent", v, sizeof v) && seq(v, "100"));
+      }
     }
     *e = save;
     line = *e ? e + 1 : e;
@@ -1121,6 +1294,15 @@ int main(void) {
     scpy(bookPath, lastFinished, PATH_MAX_LEN);
     booksFinished = 0; nDbLangs = 0;
   }
+  {  // the ticket style, saved by a long press
+    char tp[160], *q = tp;
+    for (int i = 0; i < dirLen; i++) *q++ = dir[i];
+    if (q == tp || q[-1] != '/') *q++ = '/';
+    q = sput(q, "theme");
+    char t[8];
+    const int tn = dsn_fs_read(tp, (int)(q - tp), t, sizeof t);
+    if (tn > 0 && t[0] == 't') themeFlight = 0;
+  }
   lookupBook();
   loadStats(0);
   findNext();
@@ -1133,6 +1315,18 @@ int main(void) {
     switch (t) {
       case DSN_EV_CONFIRM: activate(selected); break;
       case DSN_EV_BACK: case DSN_EV_SWIPE_RIGHT: backToBook(); break;
+      case DSN_EV_LONG_PRESS: {  // switch between the torn ticket and the flight ticket
+        if ((int)DSN_EV_Y(e) >= buttonsY) break;
+        themeFlight = !themeFlight;
+        char tp[160], *q = tp;
+        for (int i = 0; i < dirLen; i++) *q++ = dir[i];
+        if (q == tp || q[-1] != '/') *q++ = '/';
+        q = sput(q, "theme");
+        const char *v = themeFlight ? "flight" : "torn";
+        dsn_fs_write(tp, (int)(q - tp), v, slen(v));
+        drawAll();
+        continue;
+      }
       case DSN_EV_PREV: selected = (selected + itemCount() - 1) % itemCount(); break;
       case DSN_EV_NEXT: selected = (selected + 1) % itemCount(); break;
       case DSN_EV_TAP: {
