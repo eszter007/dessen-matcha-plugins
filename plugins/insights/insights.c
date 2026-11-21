@@ -783,23 +783,12 @@ static void drawBattery(int right, int y) {
   text(gx - 4 - tw - 2, ty < 0 ? 0 : ty, tw + 4, DSN_FONT_SMALL, DSN_ALIGN_RIGHT, 0, buf);
 }
 
-static void drawThemeHeader(const char *title) {
-  const int top = bandTop(), sLH = dsn_line_height(DSN_FONT_SMALL), tLH = dsn_line_height(DSN_FONT_TITLE);
-  const int inset = HDR_SIDE + 4;
-  dsn_clock_t c;
-  if (dsn_clock(&c, sizeof c) == 0) {
-    char buf[8], *p = buf;
-    if (c.hour < 10) *p++ = '0';
-    p = utoa(c.hour, p); *p++ = ':';
-    if (c.minute < 10) *p++ = '0';
-    utoa(c.minute, p);
-    const int ty = top + (HDR_STRIP - sLH) / 2;
-    text(inset, ty < 0 ? 0 : ty, 80, DSN_FONT_SMALL, DSN_ALIGN_LEFT, 0, buf);
-  }
-  drawBattery(W - inset, top);
+static void drawThemeHeader(const char *title, int back) {
+  const int top = bandTop(), tLH = dsn_line_height(DSN_FONT_TITLE);
+  drawBattery(W - HDR_SIDE - 4, top);
   const int rowTop = top + HDR_STRIP, rowHt = HDR_HEIGHT - HDR_STRIP;
   int tx = HDR_SIDE;
-  if (hasTouch) {  // back arrow in the leading 48px slot
+  if (back && hasTouch) {  // a book's page: back arrow in the leading 48px slot
     int cx = HDR_SIDE + HDR_BACK / 2 - 4, cy = rowTop + rowHt / 2 - 2;
     dsn_line(cx - 10, cy, cx + 10, cy, 3, DSN_BLACK);
     dsn_line(cx - 10, cy, cx - 2, cy - 8, 3, DSN_BLACK);
@@ -807,17 +796,16 @@ static void drawThemeHeader(const char *title) {
     tx += HDR_BACK + 4;
   }
   text(tx, rowTop + (rowHt - tLH) / 2 - 2, W - tx - HDR_SIDE, DSN_FONT_TITLE, DSN_ALIGN_LEFT, DSN_TEXT_BOLD, title);
-  dsn_fill(0, top + HDR_HEIGHT - 3, W, 3, DSN_BLACK);
 }
 static int tappedBack(int x, int y) {
   const int top = bandTop() + HDR_STRIP;
-  return hasTouch && y >= top && y < bandTop() + HDR_HEIGHT && x < HDR_SIDE + HDR_BACK + 8;
+  return page == 1 && hasTouch && y >= top && y < bandTop() + HDR_HEIGHT && x < HDR_SIDE + HDR_BACK + 8;
 }
 
 // Header and language pills, drawn over the scrolled content.
 static void drawHeader(const char *title, int withTabs) {
   const int sLH = dsn_line_height(DSN_FONT_SMALL);
-  drawThemeHeader(title);
+  drawThemeHeader(title, !withTabs);
   int y = bandTop() + HDR_HEIGHT + 10;
   tabH = 0;
   if (!withTabs || nTabs <= 1) return;
